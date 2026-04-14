@@ -47,6 +47,18 @@ CREATE TABLE IF NOT EXISTS monitoring_state (
 
 -- Seed the single monitoring state row if it doesn't exist.
 INSERT OR IGNORE INTO monitoring_state (id, is_enabled) VALUES (1, 1);
+
+CREATE TABLE IF NOT EXISTS access_requests (
+    request_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id          INTEGER NOT NULL UNIQUE,
+    username         TEXT,
+    first_name       TEXT,
+    message          TEXT,
+    status           TEXT NOT NULL DEFAULT 'pending',
+    requested_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reviewed_at      TIMESTAMP,
+    reviewed_by      INTEGER
+);
 """
 
 
@@ -322,3 +334,117 @@ def record_poll(new_count: int, updated_count: int) -> None:
             """,
             (now, new_count, updated_count),
         )
+
+
+# ---------------------------------------------------------------------------
+# Access request operations
+# ---------------------------------------------------------------------------
+
+def submit_access_request(user_id: int, username: Optional[str], first_name: Optional[str],
+                          message: str) -> None:
+    """Create or update an access request for a user."""
+    with _transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO access_requests (user_id, username, first_name, message, status)
+            VALUES (?, ?, ?, ?, 'pending')
+            ON CONFLICT(user_id) DO UPDATE SET
+                username = excluded.username,
+                first_name = excluded.first_name,
+                message = excluded.message,
+                status = 'pending',
+                requested_at = CURRENT_TIMESTAMP,
+                reviewed_at = NULL,
+                reviewed_by = NULL
+            """,
+            (user_id, username, first_name, message),
+        )
+
+
+def get_pending_requests() -> List[Dict]:
+    """Return all pending access requests ordered by oldest first."""
+    conn = _get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT request_id, user_id, username, first_name, message, status,
+                   requested_at, reviewed_at, reviewed_by
+            FROM access_requests
+            WHERE status = 'pending'
+            ORDER BY requested_at ASC, request_id ASC
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_access_request(user_id: int) -> Optional[Dict]:
+    """Return access request details for a user, if present."""
+    conn = _get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT request_id, user_id, username, first_name, message, status,
+                   requested_at, reviewed_at, reviewed_by
+            FROM access_requests
+            WHERE user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def approve_request(user_id: int, reviewed_by: Optional[int] = None) -> bool:
+    """Mark a user's access request as approved."""
+    with _transaction() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE access_requests
+            SET status = 'approved', reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?
+            WHERE user_id = ?
+            """,
+            (reviewed_by, user_id),
+        )
+        return cursor.rowcount > 0
+
+
+def reject_request(user_id: int, reviewed_by: Optional[int] = None) -> bool:
+    """Mark a user's access request as rejected."""
+    with _transaction() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE access_requests
+            SET status = 'rejected', reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?
+            WHERE user_id = ?
+            """,
+            (reviewed_by, user_id),
+        )
+        return cursor.rowcount > 0
+
+
+def is_user_approved(user_id: int) -> bool:
+    """Return whether a user currently has approved access."""
+    conn = _get_connection()
+    try:
+        row = conn.execute(
+            "SELECT status FROM access_requests WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        return bool(row and row["status"] == "approved")
+    finally:
+        conn.close()
+
+
+def get_approved_users() -> List[int]:
+    """Return IDs of all users with approved access."""
+    conn = _get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT user_id FROM access_requests WHERE status = 'approved' ORDER BY user_id"
+        ).fetchall()
+        return [int(row["user_id"]) for row in rows]
+    finally:
+        conn.close()

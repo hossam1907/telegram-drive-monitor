@@ -9,7 +9,7 @@ A production-ready Telegram Bot that monitors a Google Drive folder in real-time
 - 🔔 **Real-time notifications** — alerts for new and updated files, sent instantly after detection
 - 🔍 **File search** — find files by name directly from Telegram
 - 📂 **File browsing** — paginated `/list` command with clickable Drive links
-- 🔒 **Admin-only access** — all commands protected by Telegram User ID
+- 🔒 **Admin-approved access** — users request access and admin approves/rejects
 - ♻️ **Change detection** — SQLite-backed version tracking prevents duplicate alerts
 - 📈 **Monitoring stats** — live status with counters for new and updated files
 - ⚡ **Exponential backoff** — graceful handling of Google Drive API rate limits
@@ -106,12 +106,17 @@ python main.py
 | Command | Description |
 |---------|-------------|
 | `/start` | Show the welcome message and help |
+| `/request <message>` | Request access to the bot |
+| `/requests` | Review pending access requests (admin only) |
+| `/approve <user_id>` | Approve a pending request (admin only) |
+| `/reject <user_id>` | Reject a pending request (admin only) |
 | `/list` | Browse files in the monitored folder (paginated) |
 | `/search <name>` | Search for files by name substring |
 | `/monitor` | Toggle monitoring on / off |
 | `/status` | Show monitoring statistics and last poll time |
 
-All commands are restricted to the user IDs listed in `ADMIN_USER_IDS`.
+Admin users (`ADMIN_USER_IDS`) always have access. Other users must send
+`/request <message>` and be approved first.
 
 ---
 
