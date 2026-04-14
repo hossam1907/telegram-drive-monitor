@@ -31,6 +31,8 @@ from config import (
     REQUEST_TIMEOUT,
 )
 
+logger = logging.getLogger(__name__)
+
 # Chunk size for streaming Drive file downloads (4 MB)
 _DOWNLOAD_CHUNK_SIZE: int = 4 * 1024 * 1024
 
@@ -232,6 +234,55 @@ class GoogleDriveService:
             return await self._run_in_executor(_search)
         except HttpError as exc:
             logger.error("Drive API error during search for '%s': %s", query, exc)
+            raise
+
+    async def list_folder_contents(self, folder_id: str) -> Optional[List[Dict[str, Any]]]:
+        """List all files and subfolders inside a specific Drive folder.
+
+        Unlike :meth:`list_files`, this method queries any folder by ID and
+        is *not* cached, so results are always fresh.
+
+        Args:
+            folder_id: Google Drive folder ID to list.
+
+        Returns:
+            List of file/folder metadata dicts ordered by name, or ``None``
+            if the folder is inaccessible (403/404).
+
+        Raises:
+            HttpError: For Drive API errors other than 403/404.
+        """
+        def _list() -> List[Dict[str, Any]]:
+            files: List[Dict[str, Any]] = []
+            page_token: Optional[str] = None
+            query = f"'{folder_id}' in parents and trashed = false"
+
+            while True:
+                request = self._service.files().list(
+                    q=query,
+                    spaces="drive",
+                    fields=f"nextPageToken, files({DRIVE_FILE_FIELDS})",
+                    orderBy="folder,name",
+                    pageSize=100,
+                    pageToken=page_token,
+                )
+                response = self._execute_with_backoff(request)
+                files.extend(response.get("files", []))
+                page_token = response.get("nextPageToken")
+                if not page_token:
+                    break
+
+            logger.debug("Listed %d items from folder '%s'.", len(files), folder_id)
+            return files
+
+        try:
+            return await self._run_in_executor(_list)
+        except HttpError as exc:
+            status = exc.resp.status if exc.resp else 0
+            if status in (403, 404):
+                logger.warning("Cannot access folder '%s': HTTP %d", folder_id, status)
+                return None
+            logger.error("Drive API error listing folder '%s': %s", folder_id, exc)
             raise
 
     def invalidate_cache(self) -> None:

@@ -47,6 +47,7 @@ from google_drive_service import GoogleDriveService
 from utils import (
     build_file_keyboard,
     build_files_keyboard,
+    build_folder_keyboard,
     drive_view_link,
     escape_markdown,
     format_size,
@@ -110,6 +111,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "*Available commands:*\n"
         "• /start — Show this help message\n"
         "• /list — Browse files in the monitored folder\n"
+        "• /browse `<folder_id>` — Browse files inside a specific folder\n"
         "• /download `<filename>` — Download a file directly from Drive\n"
         "• /search `<filename>` — Search for a file by name\n"
         "• /monitor — Toggle monitoring on or off\n"
@@ -180,6 +182,22 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         reply_markup=keyboard,
         disable_web_page_preview=True,
     )
+
+
+@admin_only
+async def cmd_browse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /browse <folder_id> command — list contents of a Drive folder."""
+    if not context.args:
+        await update.message.reply_text(
+            "ℹ️ Usage: /browse `<folder_id>`\n\n"
+            "You can get the folder ID from a folder's Drive link or the /list view\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+    folder_id = context.args[0].strip()
+    context.user_data["nav_stack"] = [folder_id]
+    await _send_folder_contents(update.message.reply_text, folder_id, parent_id="root")
 
 
 @admin_only
@@ -276,7 +294,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 # ---------------------------------------------------------------------------
 
 async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle inline keyboard callbacks (pagination and download buttons)."""
+    """Handle inline keyboard callbacks (pagination, download, and folder browsing)."""
     query = update.callback_query
     await query.answer()
 
@@ -295,6 +313,34 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     elif data.startswith("download:"):
         file_id = data.split(":", 1)[1]
         await _process_download(context.bot, query.message.chat_id, file_id)
+
+    elif data.startswith("folder:"):
+        # Open a subfolder — push it onto the nav stack, determine parent before appending
+        folder_id = data.split(":", 1)[1]
+        nav_stack: list = context.user_data.setdefault("nav_stack", [])
+        # The parent for the back button is the current top of the stack (where we came from)
+        parent_id = nav_stack[-1] if nav_stack else "root"
+        nav_stack.append(folder_id)
+        await _send_folder_contents(query.edit_message_text, folder_id, parent_id=parent_id)
+
+    elif data.startswith("back:"):
+        parent_id = data.split(":", 1)[1]
+        nav_stack = context.user_data.get("nav_stack", [])
+        # Pop the current folder off the stack
+        if nav_stack:
+            nav_stack.pop()
+        # "back:root" means "return to /list"
+        if parent_id == "root":
+            context.user_data["nav_stack"] = []
+            await _send_file_list(query.edit_message_text, 0)
+        else:
+            # Display the parent folder; its own parent is the new top of the stack
+            grandparent_id = nav_stack[-2] if len(nav_stack) >= 2 else "root"
+            await _send_folder_contents(query.edit_message_text, parent_id, parent_id=grandparent_id)
+
+    elif data == "home":
+        context.user_data["nav_stack"] = []
+        await _send_file_list(query.edit_message_text, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -441,6 +487,64 @@ async def _process_download(bot, chat_id: int, file_id: str) -> None:
                 os.remove(temp_path)
             except OSError as exc:
                 logger.warning("Could not remove temp file '%s': %s", temp_path, exc)
+
+
+
+# ---------------------------------------------------------------------------
+# Folder contents renderer
+# ---------------------------------------------------------------------------
+
+async def _send_folder_contents(reply_fn, folder_id: str, parent_id: str) -> None:
+    """Fetch and display the contents of a Drive folder with navigation buttons.
+
+    Args:
+        reply_fn: Callable used to send or edit the message.
+        folder_id: Google Drive folder ID to list.
+        parent_id: Drive folder ID of the parent folder (for the Back button),
+            or the sentinel string ``"root"`` to return to the /list view.
+    """
+    _FOLDER_MIME = "application/vnd.google-apps.folder"
+
+    items = await _drive.list_folder_contents(folder_id)
+
+    if items is None:
+        await reply_fn("❌ Cannot access this folder\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        return
+
+    # Fetch folder name for header
+    folder_meta = await _drive.get_file_metadata(folder_id)
+    folder_name = folder_meta.get("name", "Folder") if folder_meta else "Folder"
+
+    if not items:
+        # Empty folder
+        nav_keyboard = build_folder_keyboard([], parent_id=parent_id)
+        await reply_fn(
+            f"📂 *{escape_markdown(folder_name)}*\n\n_This folder is empty\\._",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=nav_keyboard,
+        )
+        return
+
+    lines = [f"📂 *{escape_markdown(folder_name)}*\n"]
+    for item in items:
+        mime = item.get("mimeType", "")
+        name = escape_markdown(item.get("name", "Unnamed"))
+        size = format_size(item.get("size"))
+        if mime == _FOLDER_MIME:
+            lines.append(f"📁 {name} \\(Folder\\)")
+        else:
+            icon = get_mime_icon(mime)
+            lines.append(f"{icon} {name} — {escape_markdown(size)}")
+
+    text = truncate_message("\n".join(lines))
+    keyboard = build_folder_keyboard(items, parent_id=parent_id)
+
+    await reply_fn(
+        text,
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=keyboard,
+        disable_web_page_preview=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -644,6 +748,7 @@ def main() -> None:
     # Register command handlers
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("list", cmd_list))
+    app.add_handler(CommandHandler("browse", cmd_browse))
     app.add_handler(CommandHandler("download", cmd_download))
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("monitor", cmd_monitor))
