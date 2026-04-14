@@ -56,6 +56,7 @@ from utils import (
     get_mime_icon,
     get_mime_label,
     truncate_message,
+    _FOLDER_MIME_TYPE,
 )
 
 logger = logging.getLogger(__name__)
@@ -324,19 +325,19 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         await _send_folder_contents(query.edit_message_text, folder_id, parent_id=parent_id)
 
     elif data.startswith("back:"):
-        parent_id = data.split(":", 1)[1]
+        target_folder_id = data.split(":", 1)[1]
         nav_stack = context.user_data.get("nav_stack", [])
         # Pop the current folder off the stack
         if nav_stack:
             nav_stack.pop()
         # "back:root" means "return to /list"
-        if parent_id == "root":
+        if target_folder_id == "root":
             context.user_data["nav_stack"] = []
             await _send_file_list(query.edit_message_text, 0)
         else:
-            # Display the parent folder; its own parent is the new top of the stack
+            # Display the target folder; its own parent is the item before it in the stack
             grandparent_id = nav_stack[-2] if len(nav_stack) >= 2 else "root"
-            await _send_folder_contents(query.edit_message_text, parent_id, parent_id=grandparent_id)
+            await _send_folder_contents(query.edit_message_text, target_folder_id, parent_id=grandparent_id)
 
     elif data == "home":
         context.user_data["nav_stack"] = []
@@ -503,8 +504,6 @@ async def _send_folder_contents(reply_fn, folder_id: str, parent_id: str) -> Non
         parent_id: Drive folder ID of the parent folder (for the Back button),
             or the sentinel string ``"root"`` to return to the /list view.
     """
-    _FOLDER_MIME = "application/vnd.google-apps.folder"
-
     items = await _drive.list_folder_contents(folder_id)
 
     if items is None:
@@ -530,7 +529,7 @@ async def _send_folder_contents(reply_fn, folder_id: str, parent_id: str) -> Non
         mime = item.get("mimeType", "")
         name = escape_markdown(item.get("name", "Unnamed"))
         size = format_size(item.get("size"))
-        if mime == _FOLDER_MIME:
+        if mime == _FOLDER_MIME_TYPE:
             lines.append(f"📁 {name} \\(Folder\\)")
         else:
             icon = get_mime_icon(mime)

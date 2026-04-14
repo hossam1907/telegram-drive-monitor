@@ -335,6 +335,10 @@ def build_file_keyboard(file_id: str, web_view_link: Optional[str] = None) -> In
     )
 
 
+# MIME type for Google Drive folders
+_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
+
+
 def build_folder_keyboard(
     files: List[Dict],
     parent_id: str = "root",
@@ -358,8 +362,6 @@ def build_folder_keyboard(
     Returns:
         An :class:`InlineKeyboardMarkup` with item rows and a navigation row.
     """
-    _FOLDER_MIME = "application/vnd.google-apps.folder"
-
     rows: List[List[InlineKeyboardButton]] = []
 
     for f in files:
@@ -368,7 +370,7 @@ def build_folder_keyboard(
         mime_type = f.get("mimeType", "")
         btn_label = (name[:_MAX_BUTTON_LABEL_LENGTH] + "…") if len(name) > _MAX_BUTTON_LABEL_LENGTH else name
 
-        if mime_type == _FOLDER_MIME:
+        if mime_type == _FOLDER_MIME_TYPE:
             rows.append([
                 InlineKeyboardButton(f"📂 {btn_label}", callback_data=f"folder:{file_id}"),
             ])
@@ -417,15 +419,13 @@ def build_files_keyboard(
 
     rows: List[List[InlineKeyboardButton]] = []
 
-    _FOLDER_MIME = "application/vnd.google-apps.folder"
-
     for f in files:
         file_id = f.get("file_id") or f.get("id", "")
         name = f.get("name", "File")
         mime_type = f.get("mime_type") or f.get("mimeType", "")
         view_url = f.get("webViewLink") or drive_view_link(file_id)
         btn_label = (name[:_MAX_BUTTON_LABEL_LENGTH] + "…") if len(name) > _MAX_BUTTON_LABEL_LENGTH else name
-        if mime_type == _FOLDER_MIME:
+        if mime_type == _FOLDER_MIME_TYPE:
             rows.append([
                 InlineKeyboardButton(f"📂 {btn_label}", callback_data=f"folder:{file_id}"),
                 InlineKeyboardButton("🔗", url=view_url),
