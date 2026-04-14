@@ -42,7 +42,7 @@ def format_size(size_bytes: Optional[int]) -> str:
         >>> format_size(None)
         'N/A'
     """
-    # Drive API may return sizes as strings; normalise to int
+    # Drive API may return sizes as strings; normalize to int
     if isinstance(size_bytes, str):
         try:
             size_bytes = int(size_bytes)

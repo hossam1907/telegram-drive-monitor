@@ -7,6 +7,7 @@ and starts the background Drive polling task.
 
 import asyncio
 import functools
+import io
 import logging
 import os
 import tempfile
@@ -657,67 +658,55 @@ async def _download_and_send_file(
     )
 
     if file_bytes is None:
-        logger.warning("File '%s' not found on Drive (download returned None).", file_id)
+        logger.warning("File '%s' not found on Drive (download returned None).", file_name)
         return
 
-    suffix = os.path.splitext(file_name)[1] or ""
-    fd, temp_path = tempfile.mkstemp(suffix=suffix, dir=TEMP_DIR)
+    # Use an in-memory buffer so the bytes are only read once regardless of
+    # the number of admin users to notify.
+    buf = io.BytesIO(file_bytes)
+    caption = (
+        f"📄 *{escape_markdown(file_name)}*\n"
+        f"📏 {escape_markdown(format_size(file_size))}\n"
+        f"🕐 {escape_markdown(format_timestamp(modified_time))}"
+    )
+    category = get_file_category(mime_type)
 
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(file_bytes)
-
-        caption = (
-            f"📄 *{escape_markdown(file_name)}*\n"
-            f"📏 {escape_markdown(format_size(file_size))}\n"
-            f"🕐 {escape_markdown(format_timestamp(modified_time))}"
-        )
-
-        category = get_file_category(mime_type)
-
-        for admin_id in admin_ids:
-            try:
-                with open(temp_path, "rb") as fh:
-                    if category == "photo":
-                        await app.bot.send_photo(
-                            chat_id=admin_id,
-                            photo=fh,
-                            caption=caption,
-                            parse_mode=ParseMode.MARKDOWN_V2,
-                        )
-                    elif category == "video":
-                        await app.bot.send_video(
-                            chat_id=admin_id,
-                            video=fh,
-                            caption=caption,
-                            parse_mode=ParseMode.MARKDOWN_V2,
-                        )
-                    elif category == "audio":
-                        await app.bot.send_audio(
-                            chat_id=admin_id,
-                            audio=fh,
-                            caption=caption,
-                            parse_mode=ParseMode.MARKDOWN_V2,
-                            filename=file_name,
-                        )
-                    else:
-                        await app.bot.send_document(
-                            chat_id=admin_id,
-                            document=fh,
-                            caption=caption,
-                            parse_mode=ParseMode.MARKDOWN_V2,
-                            filename=file_name,
-                        )
-                logger.info("Sent file '%s' to admin %d.", file_name, admin_id)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Could not send file to admin %d: %s", admin_id, exc)
-
-    finally:
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except OSError as exc:
-                logger.warning("Could not remove temp file '%s': %s", temp_path, exc)
+    for admin_id in admin_ids:
+        buf.seek(0)
+        try:
+            if category == "photo":
+                await app.bot.send_photo(
+                    chat_id=admin_id,
+                    photo=buf,
+                    caption=caption,
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                )
+            elif category == "video":
+                await app.bot.send_video(
+                    chat_id=admin_id,
+                    video=buf,
+                    caption=caption,
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                )
+            elif category == "audio":
+                await app.bot.send_audio(
+                    chat_id=admin_id,
+                    audio=buf,
+                    caption=caption,
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    filename=file_name,
+                )
+            else:
+                await app.bot.send_document(
+                    chat_id=admin_id,
+                    document=buf,
+                    caption=caption,
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    filename=file_name,
+                )
+            logger.info("Sent file '%s' to admin %d.", file_name, admin_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not send file to admin %d: %s", admin_id, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -783,31 +772,36 @@ async def _polling_task(app: Application) -> None:
                         updated_count += 1
 
                     # Try to download and send the actual file instead of a text notification
-                    if _is_downloadable_file(mime_type):
-                        if size is not None and size < MAX_FILE_SIZE:
-                            try:
-                                await _download_and_send_file(
-                                    app=app,
-                                    admin_ids=ADMIN_USER_IDS,
-                                    file_id=file_id,
-                                    file_name=name,
-                                    file_size=size,
-                                    mime_type=mime_type,
-                                    modified_time=modified_time,
-                                )
-                                continue  # Skip the text notification
-                            except Exception as exc:  # noqa: BLE001
-                                logger.warning(
-                                    "Failed to download/send file '%s': %s. Sending link instead.",
-                                    name,
-                                    exc,
-                                )
-                        elif size is not None and size >= MAX_FILE_SIZE:
-                            logger.info(
-                                "File '%s' too large (%s). Sending Drive link instead.",
-                                name,
-                                format_size(size),
+                    can_download = _is_downloadable_file(mime_type) and size is not None
+                    file_sent = False
+
+                    if can_download and size < MAX_FILE_SIZE:
+                        try:
+                            await _download_and_send_file(
+                                app=app,
+                                admin_ids=ADMIN_USER_IDS,
+                                file_id=file_id,
+                                file_name=name,
+                                file_size=size,
+                                mime_type=mime_type,
+                                modified_time=modified_time,
                             )
+                            file_sent = True
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                "Failed to download/send file '%s': %s. Sending link instead.",
+                                name,
+                                exc,
+                            )
+                    elif can_download and size >= MAX_FILE_SIZE:
+                        logger.info(
+                            "File '%s' too large (%s). Sending Drive link instead.",
+                            name,
+                            format_size(size),
+                        )
+
+                    if file_sent:
+                        continue
 
                     # Fallback: send a text notification with a Drive link
                     icon = get_mime_icon(mime_type)
