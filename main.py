@@ -8,6 +8,8 @@ and starts the background Drive polling task.
 import asyncio
 import functools
 import logging
+import os
+import tempfile
 from typing import Callable, Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -22,9 +24,12 @@ from telegram.ext import (
 import config
 from config import (
     ADMIN_USER_IDS,
+    DOWNLOAD_TIMEOUT,
+    MAX_FILE_SIZE,
     PAGE_SIZE,
     POLL_INTERVAL,
     TELEGRAM_BOT_TOKEN,
+    TEMP_DIR,
 )
 import database
 from database import (
@@ -41,10 +46,12 @@ from database import (
 from google_drive_service import GoogleDriveService
 from utils import (
     build_file_keyboard,
-    build_pagination_keyboard,
+    build_files_keyboard,
+    drive_view_link,
     escape_markdown,
     format_size,
     format_timestamp,
+    get_file_category,
     get_mime_icon,
     get_mime_label,
     truncate_message,
@@ -103,6 +110,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "*Available commands:*\n"
         "• /start — Show this help message\n"
         "• /list — Browse files in the monitored folder\n"
+        "• /download `<filename>` — Download a file directly from Drive\n"
         "• /search `<filename>` — Search for a file by name\n"
         "• /monitor — Toggle monitoring on or off\n"
         "• /status — Show monitoring statistics\n"
@@ -156,20 +164,61 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         name = escape_markdown(f["name"])
         size = format_size(f.get("size"))
         modified = format_timestamp(f.get("modified_time"))
-        file_id = f["file_id"]
-        view_url = f"https://drive.google.com/file/d/{file_id}/view"
         lines.append(
-            f"{icon} [{name}]({view_url})\n"
+            f"{icon} {name}\n"
             f"   📏 {escape_markdown(size)} · 🕐 {escape_markdown(modified)}\n"
         )
 
     if len(results) > PAGE_SIZE:
         lines.append(f"\n_Showing first {PAGE_SIZE} of {len(results)} results\\._")
 
+    keyboard = build_files_keyboard(results[:PAGE_SIZE], page=0, total_pages=1)
+
     await update.message.reply_text(
         "\n".join(lines),
         parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=keyboard,
         disable_web_page_preview=True,
+    )
+
+
+@admin_only
+async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /download <filename> command — download a file from Drive."""
+    if not context.args:
+        await update.message.reply_text(
+            "ℹ️ Usage: /download `<filename>`\n\nExample: `/download report\\.pdf`",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+    query = " ".join(context.args)
+    results = db_search_files(query, limit=10)
+
+    if not results:
+        await update.message.reply_text(
+            f"❌ No files found matching *{escape_markdown(query)}*\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+    if len(results) == 1:
+        await _process_download(context.bot, update.effective_chat.id, results[0]["file_id"])
+        return
+
+    # Multiple matches — let the user pick
+    lines = [f"🔍 *Found {len(results)} files matching* `{escape_markdown(query)}`\\:\n"]
+    for f in results:
+        icon = get_mime_icon(f.get("mime_type"))
+        name = escape_markdown(f["name"])
+        size = escape_markdown(format_size(f.get("size")))
+        lines.append(f"{icon} {name} — {size}")
+
+    keyboard = build_files_keyboard(results, page=0, total_pages=1)
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=keyboard,
     )
 
 
@@ -184,7 +233,7 @@ async def cmd_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if new_state:
         await update.message.reply_text(
             "✅ *Monitoring enabled\\.*\n"
-            f"I will check for Drive changes every *{POLL_INTERVAL // 60} minute(s)*\\.",
+            f"I will check for Drive changes every *{POLL_INTERVAL // 60} minutes*\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
         )
     else:
@@ -227,7 +276,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 # ---------------------------------------------------------------------------
 
 async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle inline keyboard callbacks (pagination buttons)."""
+    """Handle inline keyboard callbacks (pagination and download buttons)."""
     query = update.callback_query
     await query.answer()
 
@@ -243,13 +292,163 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
             page = 0
         await _send_file_list(query.edit_message_text, page)
 
+    elif data.startswith("download:"):
+        file_id = data.split(":", 1)[1]
+        await _process_download(context.bot, query.message.chat_id, file_id)
+
+
+# ---------------------------------------------------------------------------
+# File download helper
+# ---------------------------------------------------------------------------
+
+async def _process_download(bot, chat_id: int, file_id: str) -> None:
+    """Download a file from Google Drive and send it to a Telegram chat.
+
+    Workflow:
+    1. Fetch file metadata from Drive.
+    2. If it is a Google Workspace file, send the Drive link instead.
+    3. If the file exceeds the 50 MB Telegram limit, send a warning + link.
+    4. Otherwise download to a temp file, detect the file category, and send
+       it to Telegram as the appropriate media type.
+    5. Clean up the temp file regardless of outcome.
+
+    Args:
+        bot: The :class:`telegram.Bot` instance.
+        chat_id: Telegram chat ID to send the file to.
+        file_id: Google Drive file ID.
+    """
+    try:
+        status_msg = await bot.send_message(chat_id=chat_id, text="⏳ Fetching file info…")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not send status message for download of '%s': %s", file_id, exc)
+        return
+
+    temp_path: Optional[str] = None
+
+    try:
+        metadata = await _drive.get_file_metadata(file_id)
+        if metadata is None:
+            await status_msg.edit_text("❌ File not found on Google Drive\\.", parse_mode=ParseMode.MARKDOWN_V2)
+            return
+
+        file_name: str = metadata.get("name", "file")
+        mime_type: str = metadata.get("mimeType", "") or ""
+        size_raw = metadata.get("size")
+        size: Optional[int] = int(size_raw) if size_raw else None
+        modified_time: Optional[str] = metadata.get("modifiedTime")
+        view_url: str = metadata.get("webViewLink") or drive_view_link(file_id)
+
+        # Google Workspace files cannot be downloaded with get_media
+        if mime_type.startswith("application/vnd.google-apps."):
+            await status_msg.edit_text(
+                f"ℹ️ *{escape_markdown(file_name)}* is a Google Workspace file and "
+                f"cannot be downloaded directly\\.\n\n"
+                f"[Open in Google Drive]({view_url})",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                disable_web_page_preview=False,
+            )
+            return
+
+        # Enforce the 50 MB Telegram upload limit
+        if size is not None and size > MAX_FILE_SIZE:
+            await status_msg.edit_text(
+                f"⚠️ *{escape_markdown(file_name)}* is too large to send via Telegram\\.\n"
+                f"📏 Size: {escape_markdown(format_size(size))} \\(limit: 50 MB\\)\n\n"
+                f"[Open in Google Drive]({view_url})",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                disable_web_page_preview=False,
+            )
+            return
+
+        await status_msg.edit_text("⏳ Downloading from Google Drive…")
+
+        try:
+            file_bytes = await asyncio.wait_for(
+                _drive.download_file(file_id),
+                timeout=DOWNLOAD_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            await status_msg.edit_text(
+                f"⏱️ Download timed out\\. [Open in Drive]({view_url})",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+            return
+
+        if file_bytes is None:
+            await status_msg.edit_text(
+                f"❌ Could not download the file\\. [Open in Drive]({view_url})",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+            return
+
+        # Write to a temporary file to avoid memory pressure on large files
+        suffix = os.path.splitext(file_name)[1] or ""
+        fd, temp_path = tempfile.mkstemp(suffix=suffix, dir=TEMP_DIR)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(file_bytes)
+
+        caption = (
+            f"📁 *{escape_markdown(file_name)}*\n"
+            f"📏 {escape_markdown(format_size(size if size is not None else len(file_bytes)))}\n"
+            f"🕐 {escape_markdown(format_timestamp(modified_time))}"
+        )
+
+        await status_msg.edit_text("📤 Uploading to Telegram…")
+
+        category = get_file_category(mime_type)
+        with open(temp_path, "rb") as fh:
+            if category == "photo":
+                await bot.send_photo(
+                    chat_id=chat_id, photo=fh,
+                    caption=caption, parse_mode=ParseMode.MARKDOWN_V2,
+                )
+            elif category == "video":
+                await bot.send_video(
+                    chat_id=chat_id, video=fh,
+                    caption=caption, parse_mode=ParseMode.MARKDOWN_V2,
+                )
+            elif category == "audio":
+                await bot.send_audio(
+                    chat_id=chat_id, audio=fh,
+                    caption=caption, parse_mode=ParseMode.MARKDOWN_V2,
+                    filename=file_name,
+                )
+            else:
+                await bot.send_document(
+                    chat_id=chat_id, document=fh,
+                    caption=caption, parse_mode=ParseMode.MARKDOWN_V2,
+                    filename=file_name,
+                )
+
+        await status_msg.delete()
+
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Error downloading file '%s': %s", file_id, exc, exc_info=True)
+        try:
+            await status_msg.edit_text(
+                f"❌ An error occurred while downloading the file\\.\n"
+                f"[Open in Google Drive]({drive_view_link(file_id)})",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+        except Exception as inner_exc:  # noqa: BLE001
+            logger.debug("Could not edit status message after download error: %s", inner_exc)
+
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError as exc:
+                logger.warning("Could not remove temp file '%s': %s", temp_path, exc)
+
 
 # ---------------------------------------------------------------------------
 # Shared file-list renderer
 # ---------------------------------------------------------------------------
 
 async def _send_file_list(reply_fn, page: int) -> None:
-    """Build and send a paginated file list message.
+    """Build and send a paginated file list message with download buttons.
 
     Args:
         reply_fn: Callable used to send or edit the message
@@ -278,14 +477,12 @@ async def _send_file_list(reply_fn, page: int) -> None:
         icon = get_mime_icon(f.get("mime_type"))
         name = escape_markdown(f["name"])
         size = format_size(f.get("size"))
-        file_id = f["file_id"]
-        view_url = f"https://drive.google.com/file/d/{file_id}/view"
         lines.append(
-            f"{icon} [{name}]({view_url}) — {escape_markdown(size)}"
+            f"{icon} {name} — {escape_markdown(size)}"
         )
 
     text = truncate_message("\n".join(lines))
-    keyboard = build_pagination_keyboard("list", page, total_pages)
+    keyboard = build_files_keyboard(page_files, page, total_pages)
 
     await reply_fn(
         text,
@@ -447,6 +644,7 @@ def main() -> None:
     # Register command handlers
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("list", cmd_list))
+    app.add_handler(CommandHandler("download", cmd_download))
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("monitor", cmd_monitor))
     app.add_handler(CommandHandler("status", cmd_status))

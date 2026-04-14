@@ -8,11 +8,14 @@ escaping, Google Drive link construction, and inline keyboard helpers.
 import math
 import re
 from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import PAGE_SIZE, TELEGRAM_MAX_MESSAGE_LENGTH
+
+# Maximum characters to show in an inline keyboard button label for file names
+_MAX_BUTTON_LABEL_LENGTH: int = 25
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +163,26 @@ def get_mime_label(mime_type: Optional[str]) -> str:
     return _MIME_LABELS.get(mime_type, mime_type.split("/")[-1].upper())
 
 
+def get_file_category(mime_type: Optional[str]) -> str:
+    """Determine the Telegram file category from a MIME type.
+
+    Args:
+        mime_type: MIME type string.
+
+    Returns:
+        One of ``"photo"``, ``"video"``, ``"audio"``, or ``"document"``.
+    """
+    if not mime_type:
+        return "document"
+    if mime_type.startswith("image/"):
+        return "photo"
+    if mime_type.startswith("video/"):
+        return "video"
+    if mime_type.startswith("audio/"):
+        return "audio"
+    return "document"
+
+
 # ---------------------------------------------------------------------------
 # Google Drive link helpers
 # ---------------------------------------------------------------------------
@@ -292,7 +315,7 @@ def build_pagination_keyboard(
 
 
 def build_file_keyboard(file_id: str, web_view_link: Optional[str] = None) -> InlineKeyboardMarkup:
-    """Create an inline keyboard with a link to open a file in Drive.
+    """Create an inline keyboard with download and Drive link buttons for a file.
 
     Args:
         file_id: Google Drive file ID (used as fallback if *web_view_link* is
@@ -300,9 +323,66 @@ def build_file_keyboard(file_id: str, web_view_link: Optional[str] = None) -> In
         web_view_link: Direct web-view URL from the Drive API.
 
     Returns:
-        An :class:`InlineKeyboardMarkup` with an "Open in Drive" button.
+        An :class:`InlineKeyboardMarkup` with "Download" and "Open in Drive"
+        buttons.
     """
     url = web_view_link or drive_view_link(file_id)
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🔗 Open in Drive", url=url)]]
+        [[
+            InlineKeyboardButton("📥 Download", callback_data=f"download:{file_id}"),
+            InlineKeyboardButton("🔗 Open in Drive", url=url),
+        ]]
     )
+
+
+def build_files_keyboard(
+    files: List[Dict],
+    page: int = 0,
+    total_pages: int = 1,
+    callback_prefix: str = "list",
+) -> Optional[InlineKeyboardMarkup]:
+    """Build an inline keyboard with per-file download/view buttons and pagination.
+
+    Each file gets a row with a ``📥 Download`` callback button and a
+    ``🔗`` link button.  A pagination row is appended when *total_pages* > 1.
+
+    Files may use either the DB key ``"file_id"`` or the Drive API key ``"id"``.
+
+    Args:
+        files: List of file metadata dicts (DB or Drive API format).
+        page: Zero-based index of the current page.
+        total_pages: Total number of pages (used to draw navigation buttons).
+        callback_prefix: Callback-data prefix for pagination buttons.
+
+    Returns:
+        An :class:`InlineKeyboardMarkup`, or ``None`` if *files* is empty.
+    """
+    if not files:
+        return None
+
+    rows: List[List[InlineKeyboardButton]] = []
+
+    for f in files:
+        file_id = f.get("file_id") or f.get("id", "")
+        name = f.get("name", "File")
+        view_url = f.get("webViewLink") or drive_view_link(file_id)
+        btn_label = (name[:_MAX_BUTTON_LABEL_LENGTH] + "…") if len(name) > _MAX_BUTTON_LABEL_LENGTH else name
+        rows.append([
+            InlineKeyboardButton(f"📥 {btn_label}", callback_data=f"download:{file_id}"),
+            InlineKeyboardButton("🔗", url=view_url),
+        ])
+
+    if total_pages > 1:
+        nav: List[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(
+                InlineKeyboardButton("◀", callback_data=f"{callback_prefix}:{page - 1}")
+            )
+        nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="noop"))
+        if page < total_pages - 1:
+            nav.append(
+                InlineKeyboardButton("▶", callback_data=f"{callback_prefix}:{page + 1}")
+            )
+        rows.append(nav)
+
+    return InlineKeyboardMarkup(rows)

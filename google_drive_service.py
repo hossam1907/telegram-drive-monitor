@@ -7,6 +7,7 @@ don't stall the asyncio event loop.
 """
 
 import asyncio
+import io
 import logging
 import time
 from functools import partial
@@ -15,6 +16,7 @@ from typing import Any, Dict, List, Optional
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaIoBaseDownload
 
 from config import (
     BACKOFF_INITIAL_DELAY,
@@ -29,7 +31,8 @@ from config import (
     REQUEST_TIMEOUT,
 )
 
-logger = logging.getLogger(__name__)
+# Chunk size for streaming Drive file downloads (4 MB)
+_DOWNLOAD_CHUNK_SIZE: int = 4 * 1024 * 1024
 
 
 class GoogleDriveService:
@@ -236,3 +239,35 @@ class GoogleDriveService:
         self._cache = []
         self._cache_time = 0.0
         logger.debug("Drive file cache invalidated.")
+
+    async def download_file(self, file_id: str) -> Optional[bytes]:
+        """Download a file from Google Drive and return its content as bytes.
+
+        Args:
+            file_id: Google Drive file ID.
+
+        Returns:
+            The file content as :class:`bytes`, or ``None`` if the file was
+            not found.
+
+        Raises:
+            HttpError: For Drive API errors other than 404.
+        """
+        def _download() -> bytes:
+            request = self._service.files().get_media(fileId=file_id)
+            buffer = io.BytesIO()
+            downloader = MediaIoBaseDownload(buffer, request, chunksize=_DOWNLOAD_CHUNK_SIZE)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+            return buffer.getvalue()
+
+        try:
+            return await self._run_in_executor(_download)
+        except HttpError as exc:
+            status = exc.resp.status if exc.resp else 0
+            if status == 404:
+                logger.warning("File '%s' not found on Drive for download.", file_id)
+                return None
+            logger.error("Drive API error downloading file '%s': %s", file_id, exc)
+            raise
