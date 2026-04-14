@@ -50,7 +50,7 @@ INSERT OR IGNORE INTO monitoring_state (id, is_enabled) VALUES (1, 1);
 
 CREATE TABLE IF NOT EXISTS access_requests (
     request_id       INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id          INTEGER UNIQUE,
+    user_id          INTEGER NOT NULL UNIQUE,
     username         TEXT,
     first_name       TEXT,
     message          TEXT,

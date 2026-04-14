@@ -112,7 +112,7 @@ def approved_only(handler: Callable) -> Callable:
 
         logger.warning(
             "Unapproved user access attempt by %s (id=%s).",
-            user.username if user else "unknown",
+            user.username,
             user.id,
         )
         if update.message:
@@ -392,7 +392,7 @@ async def cmd_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         parse_mode=ParseMode.MARKDOWN_V2,
     )
 
-    requested_at = datetime.now(timezone.utc).strftime("%b %d, %H:%M UTC")
+    requested_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     admin_text = (
         "📥 *New access request\\!*\n\n"
         f"👤 {escape_markdown(user.first_name or 'Unknown')} "
@@ -424,17 +424,18 @@ async def cmd_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     await update.message.reply_text(f"📥 Pending requests: {len(pending)}")
     for idx, req in enumerate(pending, start=1):
-        display_name = req.get("first_name") or req.get("username") or f"User {req['user_id']}"
+        user_id = req.get("user_id")
+        display_name = req.get("first_name") or req.get("username") or f"User {user_id}"
         requested_at = req.get("requested_at") or "Unknown"
         message = req.get("message") or "-"
         text = (
-            f"{idx}️⃣ *{escape_markdown(str(display_name))}* \\(ID: `{req['user_id']}`\\)\n"
+            f"{idx}️⃣ *{escape_markdown(str(display_name))}* \\(ID: `{user_id}`\\)\n"
             f"Message: \"{escape_markdown(str(message))}\"\n"
             f"Requested: {escape_markdown(str(requested_at))}"
         )
         keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Approve", callback_data=f"approve:{req['user_id']}"),
-            InlineKeyboardButton("❌ Reject", callback_data=f"reject:{req['user_id']}"),
+            InlineKeyboardButton("✅ Approve", callback_data=f"approve:{user_id}"),
+            InlineKeyboardButton("❌ Reject", callback_data=f"reject:{user_id}"),
         ]])
         await update.message.reply_text(
             text,
