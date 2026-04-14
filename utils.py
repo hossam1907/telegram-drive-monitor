@@ -14,6 +14,9 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import PAGE_SIZE, TELEGRAM_MAX_MESSAGE_LENGTH
 
+# Maximum characters to show in an inline keyboard button label for file names
+_MAX_BUTTON_LABEL_LENGTH: int = 25
+
 
 # ---------------------------------------------------------------------------
 # Size formatting
@@ -363,7 +366,7 @@ def build_files_keyboard(
         file_id = f.get("file_id") or f.get("id", "")
         name = f.get("name", "File")
         view_url = f.get("webViewLink") or drive_view_link(file_id)
-        btn_label = (name[:25] + "…") if len(name) > 25 else name
+        btn_label = (name[:_MAX_BUTTON_LABEL_LENGTH] + "…") if len(name) > _MAX_BUTTON_LABEL_LENGTH else name
         rows.append([
             InlineKeyboardButton(f"📥 {btn_label}", callback_data=f"download:{file_id}"),
             InlineKeyboardButton("🔗", url=view_url),

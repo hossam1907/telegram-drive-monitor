@@ -31,7 +31,8 @@ from config import (
     REQUEST_TIMEOUT,
 )
 
-logger = logging.getLogger(__name__)
+# Chunk size for streaming Drive file downloads (4 MB)
+_DOWNLOAD_CHUNK_SIZE: int = 4 * 1024 * 1024
 
 
 class GoogleDriveService:
@@ -255,7 +256,7 @@ class GoogleDriveService:
         def _download() -> bytes:
             request = self._service.files().get_media(fileId=file_id)
             buffer = io.BytesIO()
-            downloader = MediaIoBaseDownload(buffer, request, chunksize=4 * 1024 * 1024)
+            downloader = MediaIoBaseDownload(buffer, request, chunksize=_DOWNLOAD_CHUNK_SIZE)
             done = False
             while not done:
                 _, done = downloader.next_chunk()

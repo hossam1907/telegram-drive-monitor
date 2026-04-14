@@ -317,7 +317,12 @@ async def _process_download(bot, chat_id: int, file_id: str) -> None:
         chat_id: Telegram chat ID to send the file to.
         file_id: Google Drive file ID.
     """
-    status_msg = await bot.send_message(chat_id=chat_id, text="⏳ Fetching file info…")
+    try:
+        status_msg = await bot.send_message(chat_id=chat_id, text="⏳ Fetching file info…")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not send status message for download of '%s': %s", file_id, exc)
+        return
+
     temp_path: Optional[str] = None
 
     try:
@@ -417,6 +422,8 @@ async def _process_download(bot, chat_id: int, file_id: str) -> None:
 
         await status_msg.delete()
 
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.error("Error downloading file '%s': %s", file_id, exc, exc_info=True)
         try:
@@ -425,8 +432,8 @@ async def _process_download(bot, chat_id: int, file_id: str) -> None:
                 f"[Open in Google Drive]({drive_view_link(file_id)})",
                 parse_mode=ParseMode.MARKDOWN_V2,
             )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as inner_exc:  # noqa: BLE001
+            logger.debug("Could not edit status message after download error: %s", inner_exc)
 
     finally:
         if temp_path and os.path.exists(temp_path):
