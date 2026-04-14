@@ -7,6 +7,7 @@ Loads and validates environment variables, defines constants, and configures log
 import logging
 import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import List
 
@@ -152,6 +153,19 @@ DRIVE_FILE_FIELDS: str = (
 
 # Maximum characters in a Telegram message
 TELEGRAM_MAX_MESSAGE_LENGTH: int = 4096
+
+# ---------------------------------------------------------------------------
+# File download settings
+# ---------------------------------------------------------------------------
+
+# Maximum file size that can be sent via Telegram (50 MB)
+MAX_FILE_SIZE: int = 50 * 1024 * 1024
+
+# Timeout in seconds for downloading a file from Google Drive
+DOWNLOAD_TIMEOUT: int = _get_int("DOWNLOAD_TIMEOUT", 60)
+
+# Directory used for temporary downloaded files
+TEMP_DIR: str = os.getenv("TEMP_DIR", tempfile.gettempdir())
 
 logger.debug(
     "Configuration loaded. Poll interval: %ds, Page size: %d, Admins: %s",
