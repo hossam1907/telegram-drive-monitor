@@ -118,6 +118,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• /search `<filename>` — Search for a file by name\n"
         "• /monitor — Toggle monitoring on or off\n"
         "• /status — Show monitoring statistics\n"
+        "• /links — Show important resource links\n"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2)
 
@@ -289,6 +290,39 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"🚀 Monitoring started: *{escape_markdown(started_at)}*\n"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2)
+
+
+@admin_only
+async def cmd_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /links command — show important resource links."""
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📺 EPE 2025", url="https://www.youtube.com/@cufeepe2562"),
+            InlineKeyboardButton("📺 EPE 2026", url="https://www.youtube.com/@CUFE_EPE26"),
+        ],
+        [
+            InlineKeyboardButton("📺 EPE 2027", url="https://www.youtube.com/@CUFE_EPE_27"),
+        ],
+        [
+            InlineKeyboardButton("🏫 Faculty Site", url="https://chreg.eng.cu.edu.eg/"),
+        ],
+    ])
+
+    text = (
+        "*📚 Important Resources*\n\n"
+        "*📺 YouTube Channels:*\n"
+        "• EPE 2025 Channel\n"
+        "• EPE 2026 Channel\n"
+        "• EPE 2027 Channel\n\n"
+        "*🏫 Faculty:*\n"
+        "• Engineering Faculty Site"
+    )
+
+    await update.message.reply_text(
+        text,
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=keyboard,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -899,6 +933,7 @@ def main() -> None:
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("monitor", cmd_monitor))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("links", cmd_links))
 
     # Inline keyboard callbacks
     app.add_handler(CallbackQueryHandler(callback_query_handler))
