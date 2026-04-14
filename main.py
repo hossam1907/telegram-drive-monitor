@@ -596,6 +596,131 @@ async def _send_file_list(reply_fn, page: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Auto-download helpers
+# ---------------------------------------------------------------------------
+
+def _is_downloadable_file(mime_type: Optional[str]) -> bool:
+    """Return ``True`` if the MIME type represents a downloadable file.
+
+    Folders and Google Workspace application types (Docs, Sheets, Slides, etc.)
+    cannot be fetched with the Drive ``get_media`` endpoint and are excluded.
+
+    Args:
+        mime_type: MIME type string from the Drive API, or ``None``.
+
+    Returns:
+        ``True`` when the file can be downloaded directly.
+    """
+    if not mime_type:
+        return False
+    return not mime_type.startswith("application/vnd.google-apps.")
+
+
+async def _download_and_send_file(
+    app: Application,
+    admin_ids: list,
+    file_id: str,
+    file_name: str,
+    file_size: int,
+    mime_type: str,
+    modified_time: Optional[str],
+) -> None:
+    """Download a file from Drive and send it to all admin users.
+
+    Writes the file content to a temporary file, determines the correct
+    Telegram send method from the MIME type, and sends the file to every
+    admin ID.  The temporary file is always removed afterwards.
+
+    Args:
+        app: The running :class:`telegram.ext.Application` instance.
+        admin_ids: List of Telegram user IDs to notify.
+        file_id: Google Drive file ID.
+        file_name: Human-readable file name (used as filename and in caption).
+        file_size: File size in bytes (used in caption).
+        mime_type: MIME type of the file.
+        modified_time: ISO-8601 modification timestamp, or ``None``.
+
+    Raises:
+        asyncio.TimeoutError: If the download exceeds :data:`DOWNLOAD_TIMEOUT`.
+        Exception: Any other error during download or upload is re-raised so
+            the caller can fall back to sending a text notification.
+    """
+    logger.info(
+        "Downloading file '%s' (%s) for auto-notification…",
+        file_name,
+        format_size(file_size),
+    )
+
+    file_bytes = await asyncio.wait_for(
+        _drive.download_file(file_id),
+        timeout=DOWNLOAD_TIMEOUT,
+    )
+
+    if file_bytes is None:
+        logger.warning("File '%s' not found on Drive (download returned None).", file_id)
+        return
+
+    suffix = os.path.splitext(file_name)[1] or ""
+    fd, temp_path = tempfile.mkstemp(suffix=suffix, dir=TEMP_DIR)
+
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(file_bytes)
+
+        caption = (
+            f"📄 *{escape_markdown(file_name)}*\n"
+            f"📏 {escape_markdown(format_size(file_size))}\n"
+            f"🕐 {escape_markdown(format_timestamp(modified_time))}"
+        )
+
+        category = get_file_category(mime_type)
+
+        for admin_id in admin_ids:
+            try:
+                with open(temp_path, "rb") as fh:
+                    if category == "photo":
+                        await app.bot.send_photo(
+                            chat_id=admin_id,
+                            photo=fh,
+                            caption=caption,
+                            parse_mode=ParseMode.MARKDOWN_V2,
+                        )
+                    elif category == "video":
+                        await app.bot.send_video(
+                            chat_id=admin_id,
+                            video=fh,
+                            caption=caption,
+                            parse_mode=ParseMode.MARKDOWN_V2,
+                        )
+                    elif category == "audio":
+                        await app.bot.send_audio(
+                            chat_id=admin_id,
+                            audio=fh,
+                            caption=caption,
+                            parse_mode=ParseMode.MARKDOWN_V2,
+                            filename=file_name,
+                        )
+                    else:
+                        await app.bot.send_document(
+                            chat_id=admin_id,
+                            document=fh,
+                            caption=caption,
+                            parse_mode=ParseMode.MARKDOWN_V2,
+                            filename=file_name,
+                        )
+                logger.info("Sent file '%s' to admin %d.", file_name, admin_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Could not send file to admin %d: %s", admin_id, exc)
+
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError as exc:
+                logger.warning("Could not remove temp file '%s': %s", temp_path, exc)
+
+
+# ---------------------------------------------------------------------------
 # Background monitoring task
 # ---------------------------------------------------------------------------
 
@@ -657,6 +782,34 @@ async def _polling_task(app: Application) -> None:
                     else:
                         updated_count += 1
 
+                    # Try to download and send the actual file instead of a text notification
+                    if _is_downloadable_file(mime_type):
+                        if size is not None and size < MAX_FILE_SIZE:
+                            try:
+                                await _download_and_send_file(
+                                    app=app,
+                                    admin_ids=ADMIN_USER_IDS,
+                                    file_id=file_id,
+                                    file_name=name,
+                                    file_size=size,
+                                    mime_type=mime_type,
+                                    modified_time=modified_time,
+                                )
+                                continue  # Skip the text notification
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning(
+                                    "Failed to download/send file '%s': %s. Sending link instead.",
+                                    name,
+                                    exc,
+                                )
+                        elif size is not None and size >= MAX_FILE_SIZE:
+                            logger.info(
+                                "File '%s' too large (%s). Sending Drive link instead.",
+                                name,
+                                format_size(size),
+                            )
+
+                    # Fallback: send a text notification with a Drive link
                     icon = get_mime_icon(mime_type)
                     msg = (
                         f"{action} file in Drive\\!\n\n"
