@@ -11,6 +11,7 @@ import io
 import logging
 import os
 import tempfile
+from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -67,7 +68,7 @@ _drive: Optional[GoogleDriveService] = None
 
 
 # ---------------------------------------------------------------------------
-# Admin access decorator
+# Access control decorators
 # ---------------------------------------------------------------------------
 
 def admin_only(handler: Callable) -> Callable:
@@ -98,11 +99,38 @@ def admin_only(handler: Callable) -> Callable:
     return wrapper
 
 
+def approved_only(handler: Callable) -> Callable:
+    """Decorator that allows admins and approved users."""
+    @functools.wraps(handler)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user = update.effective_user
+        if user is None:
+            return
+
+        if user.id in ADMIN_USER_IDS or database.is_user_approved(user.id):
+            return await handler(update, context)
+
+        logger.warning(
+            "Unapproved user access attempt by %s (id=%s).",
+            user.username if user else "unknown",
+            user.id,
+        )
+        if update.message:
+            await update.message.reply_text(
+                "❌ You don't have access\\.\n\n"
+                "Send `/request <message>` to request access\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+        return
+
+    return wrapper
+
+
 # ---------------------------------------------------------------------------
 # Command handlers
 # ---------------------------------------------------------------------------
 
-@admin_only
+@approved_only
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /start command — send a welcome message with help text."""
     user = update.effective_user
@@ -112,6 +140,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "I watch a Google Drive folder and notify you whenever files are added or updated\\.\n\n"
         "*Available commands:*\n"
         "• /start — Show this help message\n"
+        "• /request `<message>` — Request access \\(for new users\\)\n"
+        "• /requests — Review pending access requests \\(admin\\)\n"
+        "• /approve `<user_id>` — Approve a request \\(admin\\)\n"
+        "• /reject `<user_id>` — Reject a request \\(admin\\)\n"
         "• /list — Browse files in the monitored folder\n"
         "• /browse `<folder_id>` — Browse files inside a specific folder\n"
         "• /download `<filename>` — Download a file directly from Drive\n"
@@ -123,7 +155,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2)
 
 
-@admin_only
+@approved_only
 async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /list command — paginated list of tracked files."""
     page = 0
@@ -135,7 +167,7 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _send_file_list(update.message.reply_text, page)
 
 
-@admin_only
+@approved_only
 async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /search <query> command — find files by name substring."""
     if not context.args:
@@ -187,7 +219,7 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
-@admin_only
+@approved_only
 async def cmd_browse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /browse <folder_id> command — list contents of a Drive folder."""
     if not context.args:
@@ -203,7 +235,7 @@ async def cmd_browse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await _send_folder_contents(update.message.reply_text, folder_id, parent_id="root")
 
 
-@admin_only
+@approved_only
 async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /download <filename> command — download a file from Drive."""
     if not context.args:
@@ -243,7 +275,7 @@ async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
-@admin_only
+@approved_only
 async def cmd_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /monitor command — toggle background monitoring."""
     state = get_monitoring_state()
@@ -265,7 +297,7 @@ async def cmd_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
 
 
-@admin_only
+@approved_only
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /status command — display monitoring statistics."""
     state = get_monitoring_state()
@@ -292,7 +324,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2)
 
 
-@admin_only
+@approved_only
 async def cmd_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /links command — show important resource links."""
     keyboard = InlineKeyboardMarkup([
@@ -325,6 +357,104 @@ async def cmd_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /request <message> command for access requests."""
+    user = update.effective_user
+    if user is None or update.message is None:
+        return
+
+    if user.id in ADMIN_USER_IDS or database.is_user_approved(user.id):
+        await update.message.reply_text(
+            "✅ You already have access\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "ℹ️ Usage: `/request <message>`\n\n"
+            "Example: `/request I am a student in EPE 2026`",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+    request_message = " ".join(context.args).strip()
+    database.submit_access_request(
+        user_id=user.id,
+        username=user.username,
+        first_name=user.first_name,
+        message=request_message,
+    )
+
+    await update.message.reply_text(
+        "✅ Your request has been sent\\!\n"
+        "The admin will review it soon\\.",
+        parse_mode=ParseMode.MARKDOWN_V2,
+    )
+
+    requested_at = datetime.now(timezone.utc).strftime("%b %d, %H:%M UTC")
+    admin_text = (
+        "📥 *New access request\\!*\n\n"
+        f"👤 {escape_markdown(user.first_name or 'Unknown')} "
+        f"\\(ID: `{user.id}`\\)\n"
+        f"Message: \"{escape_markdown(request_message)}\"\n"
+        f"Requested: {escape_markdown(requested_at)}\n\n"
+        "Check with: /requests"
+    )
+    for admin_id in ADMIN_USER_IDS:
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=admin_text,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                disable_web_page_preview=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to notify admin %s about request from %s: %s",
+                           admin_id, user.id, exc)
+
+
+@admin_only
+async def cmd_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /requests command — show pending access requests."""
+    pending = database.get_pending_requests()
+    if not pending:
+        await update.message.reply_text("✅ No pending access requests.")
+        return
+
+    await update.message.reply_text(f"📥 Pending requests: {len(pending)}")
+    for idx, req in enumerate(pending, start=1):
+        display_name = req.get("first_name") or req.get("username") or f"User {req['user_id']}"
+        requested_at = req.get("requested_at") or "Unknown"
+        message = req.get("message") or "-"
+        text = (
+            f"{idx}️⃣ *{escape_markdown(str(display_name))}* \\(ID: `{req['user_id']}`\\)\n"
+            f"Message: \"{escape_markdown(str(message))}\"\n"
+            f"Requested: {escape_markdown(str(requested_at))}"
+        )
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Approve", callback_data=f"approve:{req['user_id']}"),
+            InlineKeyboardButton("❌ Reject", callback_data=f"reject:{req['user_id']}"),
+        ]])
+        await update.message.reply_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=keyboard,
+        )
+
+
+@admin_only
+async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /approve <user_id> command."""
+    await _handle_request_decision(update, context, approve=True)
+
+
+@admin_only
+async def cmd_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /reject <user_id> command."""
+    await _handle_request_decision(update, context, approve=False)
+
+
 # ---------------------------------------------------------------------------
 # Callback query handler for pagination
 # ---------------------------------------------------------------------------
@@ -332,6 +462,12 @@ async def cmd_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle inline keyboard callbacks (pagination, download, and folder browsing)."""
     query = update.callback_query
+    user = update.effective_user
+    if user is None:
+        return
+    if user.id not in ADMIN_USER_IDS and not database.is_user_approved(user.id):
+        await query.answer("You don't have access. Use /request first.", show_alert=True)
+        return
     await query.answer()
 
     data: str = query.data or ""
@@ -377,6 +513,106 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     elif data == "home":
         context.user_data["nav_stack"] = []
         await _send_file_list(query.edit_message_text, 0)
+
+    elif data.startswith("approve:") or data.startswith("reject:"):
+        if user.id not in ADMIN_USER_IDS:
+            await query.answer("Only admins can review requests.", show_alert=True)
+            return
+        approve = data.startswith("approve:")
+        try:
+            target_user_id = int(data.split(":", 1)[1])
+        except (TypeError, ValueError):
+            await query.answer("Invalid request user ID.", show_alert=True)
+            return
+
+        await _resolve_access_request(
+            context=context,
+            admin_user_id=user.id,
+            target_user_id=target_user_id,
+            approve=approve,
+        )
+        action_label = "approved" if approve else "rejected"
+        await query.edit_message_text(
+            f"✅ Request for user `{target_user_id}` marked as *{action_label}*\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+
+
+async def _handle_request_decision(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                   approve: bool) -> None:
+    """Handle /approve and /reject commands."""
+    if update.message is None:
+        return
+
+    if not context.args:
+        command = "approve" if approve else "reject"
+        await update.message.reply_text(
+            f"ℹ️ Usage: `/{command} <user_id>`",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+    try:
+        target_user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ User ID must be a number.")
+        return
+
+    resolved = await _resolve_access_request(
+        context=context,
+        admin_user_id=update.effective_user.id if update.effective_user else None,
+        target_user_id=target_user_id,
+        approve=approve,
+    )
+    if not resolved:
+        await update.message.reply_text(
+            f"❌ No request found for user `{target_user_id}`\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+    action_label = "approved" if approve else "rejected"
+    await update.message.reply_text(
+        f"✅ User `{target_user_id}` {action_label}\\.",
+        parse_mode=ParseMode.MARKDOWN_V2,
+    )
+
+
+async def _resolve_access_request(context: ContextTypes.DEFAULT_TYPE,
+                                  admin_user_id: Optional[int],
+                                  target_user_id: int,
+                                  approve: bool) -> bool:
+    """Approve or reject a request and notify the user."""
+    request = database.get_access_request(target_user_id)
+    if request is None:
+        return False
+
+    if approve:
+        changed = database.approve_request(target_user_id, reviewed_by=admin_user_id)
+    else:
+        changed = database.reject_request(target_user_id, reviewed_by=admin_user_id)
+
+    if not changed:
+        return False
+
+    if approve:
+        text = (
+            "✅ Your access has been approved\\!\n"
+            "You can now use: /list, /search, /download, /monitor, /status, /links\\."
+        )
+    else:
+        text = "❌ Your request was rejected\\."
+
+    try:
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text=text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not notify user %s after request review: %s", target_user_id, exc)
+
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -927,6 +1163,10 @@ def main() -> None:
 
     # Register command handlers
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("request", cmd_request))
+    app.add_handler(CommandHandler("requests", cmd_requests))
+    app.add_handler(CommandHandler("approve", cmd_approve))
+    app.add_handler(CommandHandler("reject", cmd_reject))
     app.add_handler(CommandHandler("list", cmd_list))
     app.add_handler(CommandHandler("browse", cmd_browse))
     app.add_handler(CommandHandler("download", cmd_download))
