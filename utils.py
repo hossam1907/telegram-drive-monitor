@@ -335,6 +335,63 @@ def build_file_keyboard(file_id: str, web_view_link: Optional[str] = None) -> In
     )
 
 
+# MIME type for Google Drive folders
+_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
+
+
+def build_folder_keyboard(
+    files: List[Dict],
+    parent_id: str = "root",
+) -> InlineKeyboardMarkup:
+    """Build an inline keyboard for browsing a folder's contents.
+
+    Each item gets a row with an appropriate action button:
+    - Folders get a "📂 Open" button (callback ``folder:{id}``).
+    - Regular files get a "📥 Download" button (callback ``download:{id}``).
+
+    A navigation row with a "⬅️ Back" button and a "🏠 Home" button is
+    appended at the bottom.  The Back button uses ``back:root`` when
+    *parent_id* is ``"root"`` (returns to the /list view) or
+    ``back:{parent_id}`` for any real folder ID.
+
+    Args:
+        files: List of file/folder metadata dicts from the Drive API.
+        parent_id: The Drive folder ID of the parent folder, or the sentinel
+            string ``"root"`` when already at the top level below root.
+
+    Returns:
+        An :class:`InlineKeyboardMarkup` with item rows and a navigation row.
+    """
+    rows: List[List[InlineKeyboardButton]] = []
+
+    for f in files:
+        file_id = f.get("id", "")
+        name = f.get("name", "Unnamed")
+        mime_type = f.get("mimeType", "")
+        btn_label = (name[:_MAX_BUTTON_LABEL_LENGTH] + "…") if len(name) > _MAX_BUTTON_LABEL_LENGTH else name
+
+        if mime_type == _FOLDER_MIME_TYPE:
+            rows.append([
+                InlineKeyboardButton(f"📂 {btn_label}", callback_data=f"folder:{file_id}"),
+            ])
+        else:
+            view_url = f.get("webViewLink") or drive_view_link(file_id)
+            rows.append([
+                InlineKeyboardButton(f"📥 {btn_label}", callback_data=f"download:{file_id}"),
+                InlineKeyboardButton("🔗", url=view_url),
+            ])
+
+    # Navigation row — back_data uses 'back:root' sentinel when at the top level
+    back_data = "back:root" if not parent_id or parent_id == "root" else f"back:{parent_id}"
+    nav_row = [
+        InlineKeyboardButton("⬅️ Back", callback_data=back_data),
+        InlineKeyboardButton("🏠 Home", callback_data="home"),
+    ]
+    rows.append(nav_row)
+
+    return InlineKeyboardMarkup(rows)
+
+
 def build_files_keyboard(
     files: List[Dict],
     page: int = 0,
@@ -365,12 +422,19 @@ def build_files_keyboard(
     for f in files:
         file_id = f.get("file_id") or f.get("id", "")
         name = f.get("name", "File")
+        mime_type = f.get("mime_type") or f.get("mimeType", "")
         view_url = f.get("webViewLink") or drive_view_link(file_id)
         btn_label = (name[:_MAX_BUTTON_LABEL_LENGTH] + "…") if len(name) > _MAX_BUTTON_LABEL_LENGTH else name
-        rows.append([
-            InlineKeyboardButton(f"📥 {btn_label}", callback_data=f"download:{file_id}"),
-            InlineKeyboardButton("🔗", url=view_url),
-        ])
+        if mime_type == _FOLDER_MIME_TYPE:
+            rows.append([
+                InlineKeyboardButton(f"📂 {btn_label}", callback_data=f"folder:{file_id}"),
+                InlineKeyboardButton("🔗", url=view_url),
+            ])
+        else:
+            rows.append([
+                InlineKeyboardButton(f"📥 {btn_label}", callback_data=f"download:{file_id}"),
+                InlineKeyboardButton("🔗", url=view_url),
+            ])
 
     if total_pages > 1:
         nav: List[InlineKeyboardButton] = []
