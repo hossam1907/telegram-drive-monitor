@@ -81,6 +81,10 @@ class CourseManagementDatabaseTests(unittest.TestCase):
         )
         self.assertEqual(self.database.get_course_video_count(course_id), 1)
 
+        self.database.clear_playlist_course_assignments()
+        self.assertEqual(self.database.get_course_playlists(course_id), [])
+        self.assertIsNone(self.database.get_playlist_videos("PL123")[0]["course_id"])
+
         inserted = self.database.enroll_user_in_course(user_id=99, course_id=course_id)
         self.assertTrue(inserted)
         duplicate_insert = self.database.enroll_user_in_course(user_id=99, course_id=course_id)
