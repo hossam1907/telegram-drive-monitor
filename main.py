@@ -10,9 +10,10 @@ import functools
 import io
 import logging
 import os
+import re
 import tempfile
 from datetime import datetime, timezone
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple, TypedDict
 from urllib.parse import urlparse
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -66,6 +67,17 @@ from utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _CourseExtractionTotals(TypedDict):
+    course_code: str
+    course_name: str
+    playlists: int
+    videos: int
+
+
+COURSE_MATCH_MIN_KEYWORD_LENGTH = 2
+COURSE_MATCH_MIN_REQUIRED_MATCHES = 2
 
 # Module-level Drive service instance (created in post_init)
 _drive: Optional[GoogleDriveService] = None
@@ -457,15 +469,58 @@ async def cmd_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def _match_course_for_title(title: str, courses: List[Dict]) -> Optional[Dict]:
     """Find the best matching course for a playlist/video title."""
-    title_upper = title.upper()
+    title_upper = (title or "").upper()
+    code_matches = re.findall(r"\b([A-Z]{2,4}\d{3,4})\b", title_upper)
+    code_to_course = {
+        (course.get("course_code") or "").upper(): course
+        for course in courses
+        if (course.get("course_code") or "").upper()
+    }
+
+    if code_matches:
+        for code in code_matches:
+            matched = code_to_course.get(code)
+            if matched:
+                return matched
+        return None
+
+    best_match = None
+    best_score = 0
+
     for course in courses:
-        code = (course.get("course_code") or "").upper()
-        name = (course.get("course_name") or "").upper()
-        if code and code in title_upper:
-            return course
-        if name and any(part and part in title_upper for part in name.split()):
-            return course
-    return None
+        course_name = (course.get("course_name") or "").upper()
+        if not course_name:
+            continue
+
+        name_keywords = [
+            token
+            for token in re.findall(r"[A-Z0-9]+", course_name)
+            if token.isdigit() or len(token) > COURSE_MATCH_MIN_KEYWORD_LENGTH
+        ]
+        if not name_keywords:
+            continue
+
+        matching_keywords = 0
+        for keyword in name_keywords:
+            if keyword in title_upper:
+                matching_keywords += 1
+                continue
+            if keyword.endswith("S") and len(keyword) > 3 and keyword[:-1] in title_upper:
+                matching_keywords += 1
+
+        required_matches = (
+            1
+            if len(name_keywords) == 1
+            else max(COURSE_MATCH_MIN_REQUIRED_MATCHES, (len(name_keywords) + 1) // 2)
+        )
+        if matching_keywords < required_matches:
+            continue
+
+        if matching_keywords > best_score:
+            best_score = matching_keywords
+            best_match = course
+
+    return best_match
 
 
 @admin_only
@@ -504,16 +559,36 @@ async def cmd_extract_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     status_msg = await update.message.reply_text("⏳ Extracting YouTube playlists and videos…")
     service = YouTubeService(YOUTUBE_API_KEY)
-    playlist_count = 0
-    video_count = 0
+    total_playlists_found = 0
+    matched_playlists = 0
+    skipped_playlists = 0
+    unmatched_playlists = 0
+    total_videos_processed = 0
+    videos_added = 0
+    videos_skipped = 0
+    course_totals: Dict[Tuple[str, str], _CourseExtractionTotals] = {}
+    playlist_events: List[str] = []
 
     try:
-        for channel_url in YOUTUBE_CHANNELS:
+        total_channels = len(YOUTUBE_CHANNELS)
+        for channel_index, channel_url in enumerate(YOUTUBE_CHANNELS, start=1):
             playlists = await service.get_channel_playlists(channel_url)
             for playlist in playlists:
-                matched_course = _match_course_for_title(playlist["name"], courses)
-                course_id = matched_course["course_id"] if matched_course else None
                 videos = await service.get_playlist_videos(playlist["id"])
+                total_playlists_found += 1
+                total_videos_processed += len(videos)
+                matched_course = _match_course_for_title(playlist["name"], courses)
+                if not matched_course:
+                    if re.search(r"\b[A-Z]{2,4}\d{3,4}\b", (playlist.get("name") or "").upper()):
+                        skipped_playlists += 1
+                        playlist_events.append(f"⏭️ {playlist['name']} -> skipped (different course code)")
+                    else:
+                        unmatched_playlists += 1
+                        playlist_events.append(f"❌ {playlist['name']} -> no course match")
+                    videos_skipped += len(videos)
+                    continue
+
+                course_id = matched_course["course_id"]
                 database.add_youtube_playlist(
                     playlist_id=playlist["id"],
                     course_id=course_id,
@@ -521,13 +596,28 @@ async def cmd_extract_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE
                     playlist_url=playlist["url"],
                     video_count=len(videos),
                 )
-                playlist_count += 1
+                matched_playlists += 1
+
+                course_code = matched_course.get("course_code") or "N/A"
+                course_name = matched_course.get("course_name") or "Unnamed Course"
+                course_key = (course_code, course_name)
+                if course_key not in course_totals:
+                    course_totals[course_key] = {
+                        "course_code": course_code,
+                        "course_name": course_name,
+                        "playlists": 0,
+                        "videos": 0,
+                    }
+                course_totals[course_key]["playlists"] += 1
+                playlist_events.append(
+                    f"✅ {playlist['name']} -> {course_code} ({course_name})"
+                )
+
                 for video in videos:
-                    video_course = matched_course or _match_course_for_title(video["title"], courses)
                     database.add_youtube_video(
                         video_id=video["id"],
                         playlist_id=playlist["id"],
-                        course_id=video_course["course_id"] if video_course else course_id,
+                        course_id=course_id,
                         video_title=video["title"],
                         video_url=video["url"],
                         video_order=video["order"],
@@ -535,15 +625,55 @@ async def cmd_extract_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE
                         thumbnail_url=video.get("thumbnail_url"),
                         view_count=video.get("view_count"),
                     )
-                    video_count += 1
+                    videos_added += 1
+                    course_totals[course_key]["videos"] += 1
+
+            await status_msg.edit_text(
+                "⏳ YouTube extraction in progress\n"
+                f"📡 Channels: {channel_index}/{total_channels}\n"
+                f"📺 Playlists found: {total_playlists_found}\n"
+                f"✅ Matched: {matched_playlists}\n"
+                f"⏭️ Skipped (code mismatch): {skipped_playlists}\n"
+                f"❌ Unmatched: {unmatched_playlists}",
+            )
     finally:
         await service.close()
 
+    course_lines = []
+    for _, stats in sorted(
+        course_totals.items(),
+        key=lambda item: (
+            -item[1]["videos"],
+            str(item[1]["course_code"]),
+        ),
+    ):
+        course_lines.append(
+            f"• {stats['course_code']} ({stats['course_name']}): "
+            f"{stats['playlists']} {'playlist' if stats['playlists'] == 1 else 'playlists'}, "
+            f"{stats['videos']} {'video' if stats['videos'] == 1 else 'videos'}"
+        )
+
+    if not course_lines:
+        course_lines = ["• No matched course content"]
+
+    event_lines = playlist_events[:10]
+    if len(playlist_events) > len(event_lines):
+        event_lines.append(f"… and {len(playlist_events) - len(event_lines)} more playlists")
+
     await status_msg.edit_text(
-        f"✅ YouTube extraction complete\\.\n"
-        f"📺 Playlists processed: *{playlist_count}*\n"
-        f"🎬 Videos processed: *{video_count}*",
-        parse_mode=ParseMode.MARKDOWN_V2,
+        "✅ YouTube Extraction Complete\n\n"
+        "📊 RESULTS:\n"
+        f"📺 Total Playlists Found: {total_playlists_found}\n"
+        f"✅ Successfully Matched: {matched_playlists}\n"
+        f"⏭️ Skipped (different course codes): {skipped_playlists}\n"
+        f"❌ Unmatched (no course found): {unmatched_playlists}\n\n"
+        f"🎬 Total Videos Processed: {total_videos_processed}\n"
+        f"✅ Videos Added: {videos_added}\n"
+        f"⏭️ Videos Skipped: {videos_skipped}\n\n"
+        "📚 By Course:\n"
+        + "\n".join(course_lines)
+        + "\n\n📋 Playlist Matching:\n"
+        + ("\n".join(event_lines) if event_lines else "No playlists found"),
     )
 
 
