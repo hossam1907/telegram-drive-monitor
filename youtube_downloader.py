@@ -38,7 +38,6 @@ class YouTubeDownloader:
             candidates = [
                 f for f in formats
                 if f.get("vcodec") not in (None, "none")
-                and f.get("acodec") not in (None, "none")
                 and f.get("height")
                 and int(f["height"]) <= quality
             ]
@@ -97,7 +96,12 @@ class YouTubeDownloader:
         return deduped
 
     @staticmethod
-    def _download_to_file(url: str, format_id: str, suffix: str) -> Tuple[Optional[str], Optional[Dict]]:
+    def _download_to_file(
+        url: str,
+        format_id: str,
+        suffix: str,
+        audio_only: bool = False,
+    ) -> Tuple[Optional[str], Optional[Dict]]:
         """Download the selected format to a temp file.
 
         Args:
@@ -110,11 +114,14 @@ class YouTubeDownloader:
         """
         fd, temp_path = tempfile.mkstemp(prefix="yt_", suffix=suffix)
         os.close(fd)
+        # For video selections, merge selected video stream with best audio when available.
+        # Fallback to best combined stream if merge cannot be resolved.
+        format_selector = format_id if audio_only else f"{format_id}+bestaudio/best"
         options = {
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
-            "format": format_id,
+            "format": format_selector,
             "outtmpl": temp_path,
             "overwrites": True,
             "restrictfilenames": True,
@@ -136,11 +143,23 @@ class YouTubeDownloader:
                     pass
             raise
 
-    async def download(self, url: str, format_id: str, ext_hint: str = "") -> Optional[Dict]:
+    async def download(
+        self,
+        url: str,
+        format_id: str,
+        ext_hint: str = "",
+        audio_only: bool = False,
+    ) -> Optional[Dict]:
         """Download video in specific format."""
         suffix = f".{ext_hint}" if ext_hint else ""
         try:
-            path, info = await asyncio.to_thread(self._download_to_file, url, format_id, suffix)
+            path, info = await asyncio.to_thread(
+                self._download_to_file,
+                url,
+                format_id,
+                suffix,
+                audio_only,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("yt-dlp failed for url=%s format_id=%s: %s", url, format_id, exc)
             raise RuntimeError("Failed to download requested YouTube format.") from exc
