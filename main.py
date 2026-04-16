@@ -195,42 +195,42 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if user is None:
         return
 
-    name = escape_markdown(user.first_name or "there")
+    name = user.first_name or "there"
     is_approved = user.id in ADMIN_USER_IDS or database.is_user_approved(user.id)
 
     if not is_approved:
         text = (
-            f"Hello {name}\\! Welcome to Drive Monitor Bot\\.\n\n"
-            "I watch a Google Drive folder and notify you whenever files are added or updated\\.\n\n"
+            f"Hello {name}! Welcome to Drive Monitor Bot.\n\n"
+            "I watch a Google Drive folder and notify you whenever files are added or updated.\n\n"
             "To access this bot, please request access:\n"
             "/request <message>\n\n"
             "Example: /request I am a student in EPE 2026"
         )
     else:
         text = (
-            f"Hello {name}\\! Welcome to Drive Monitor Bot\\.\n\n"
-            "I watch a Google Drive folder and notify you whenever files are added or updated\\.\n\n"
+            f"Hello {name}! Welcome to Drive Monitor Bot.\n\n"
+            "I watch a Google Drive folder and notify you whenever files are added or updated.\n\n"
             "Available commands:\n"
-            "/list \\- Browse files\n"
-            "/search <name> \\- Search files\n"
-            "/download <name> \\- Download file\n"
-            "/browse <id> \\- Browse folder\n"
-            "/monitor \\- Toggle monitoring\n"
-            "/status \\- Show statistics\n"
-            "/links \\- Show resources\n"
-            "/request <msg> \\- Request access\n"
-            "/requests \\- Review requests \\(admin\\)\n"
-            "/approve <id> \\- Approve user \\(admin\\)\n"
-            "/reject <id> \\- Reject user \\(admin\\)\n"
-            "/courses \\- Browse courses\n"
-            "/course <code> \\- Course details\n"
-            "/setup_courses \\- Setup courses \\(admin\\)\n"
-            "/extract_youtube \\- Extract YouTube \\(admin\\)\n"
-            "/download_youtube <url> \\- Download YouTube video\n"
-            "/broadcast <msg> \\- Broadcast \\(admin\\)\n"
-            "/broadcast_status \\- Broadcast status \\(admin\\)\n"
+            "/list - Browse files\n"
+            "/search <name> - Search files\n"
+            "/download <name> - Download file\n"
+            "/browse <id> - Browse folder\n"
+            "/monitor - Toggle monitoring\n"
+            "/status - Show statistics\n"
+            "/links - Show resources\n"
+            "/request <msg> - Request access\n"
+            "/requests - Review requests (admin)\n"
+            "/approve <id> - Approve user (admin)\n"
+            "/reject <id> - Reject user (admin)\n"
+            "/courses - Browse courses\n"
+            "/course <code> - Course details\n"
+            "/setup_courses - Setup courses (admin)\n"
+            "/extract_youtube - Extract YouTube (admin)\n"
+            "/download_youtube <url> - Download YouTube video\n"
+            "/broadcast <msg> - Broadcast (admin)\n"
+            "/broadcast_status - Broadcast status (admin)\n"
         )
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2)
+    await update.message.reply_text(text)
 
 
 @approved_only
