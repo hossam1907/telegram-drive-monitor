@@ -174,6 +174,7 @@ def init_db() -> None:
         }
         if "view_count" not in columns:
             conn.execute("ALTER TABLE youtube_videos ADD COLUMN view_count INTEGER")
+            logger.info("Database migration applied: added youtube_videos.view_count column.")
     logger.info("Database initialised at '%s'.", DATABASE_PATH)
 
 
@@ -672,7 +673,7 @@ def get_playlist_videos(playlist_id: str) -> List[Dict]:
         rows = conn.execute(
             """
             SELECT video_id, playlist_id, course_id, video_title, video_url, video_order,
-                   duration, view_count, thumbnail_url, created_at
+                   duration, thumbnail_url, view_count, created_at
             FROM youtube_videos
             WHERE playlist_id = ?
             ORDER BY video_order IS NULL, video_order, video_title

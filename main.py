@@ -13,6 +13,7 @@ import os
 import tempfile
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional
+from urllib.parse import urlparse
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -511,7 +512,14 @@ async def cmd_extract_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 def _is_youtube_url(url: str) -> bool:
-    return "youtube.com/" in url or "youtu.be/" in url
+    try:
+        parsed = urlparse(url.strip())
+    except ValueError:
+        return False
+    host = (parsed.netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host == "youtube.com" or host.endswith(".youtube.com") or host == "youtu.be"
 
 
 @approved_only
@@ -881,12 +889,14 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
             downloaded_path = result["path"]
             file_size = os.path.getsize(downloaded_path)
             if file_size > MAX_FILE_SIZE:
-                smaller = [
+                acceptable_formats = [
                     fmt for fmt in payload["formats"]
                     if fmt.get("filesize") and int(fmt["filesize"]) < MAX_FILE_SIZE
                 ]
                 suggestion = (
-                    f"\nTry: {smaller[-1]['label']}" if smaller else "\nTry a lower quality option."
+                    f"\nTry: {acceptable_formats[-1]['label']}"
+                    if acceptable_formats
+                    else "\nTry a lower quality option."
                 )
                 await query.edit_message_text(
                     (

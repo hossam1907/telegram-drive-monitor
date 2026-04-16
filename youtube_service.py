@@ -97,7 +97,6 @@ class YouTubeService:
             return []
 
         try:
-            video_ids: List[str] = []
             ordered_video_ids: List[str] = []
             next_page_token: Optional[str] = None
 
@@ -114,7 +113,6 @@ class YouTubeService:
                     video_id = content_details.get("videoId")
                     if not video_id:
                         continue
-                    video_ids.append(video_id)
                     ordered_video_ids.append(video_id)
 
                 next_page_token = response.get("nextPageToken")
@@ -122,8 +120,8 @@ class YouTubeService:
                     break
 
             details_by_id: Dict[str, Dict] = {}
-            for i in range(0, len(video_ids), 50):
-                batch_ids = video_ids[i:i + 50]
+            for i in range(0, len(ordered_video_ids), 50):
+                batch_ids = ordered_video_ids[i:i + 50]
                 if not batch_ids:
                     continue
                 request = self.youtube.videos().list(

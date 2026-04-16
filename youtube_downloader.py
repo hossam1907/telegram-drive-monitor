@@ -98,6 +98,16 @@ class YouTubeDownloader:
 
     @staticmethod
     def _download_to_file(url: str, format_id: str, suffix: str) -> Tuple[Optional[str], Optional[Dict]]:
+        """Download the selected format to a temp file.
+
+        Args:
+            url: YouTube video URL.
+            format_id: yt-dlp format ID selected by the user.
+            suffix: Optional file suffix hint (for temp file extension).
+
+        Returns:
+            Tuple of downloaded file path (or ``None``) and extracted video info dict.
+        """
         fd, temp_path = tempfile.mkstemp(prefix="yt_", suffix=suffix)
         os.close(fd)
         options = {
@@ -129,7 +139,11 @@ class YouTubeDownloader:
     async def download(self, url: str, format_id: str, ext_hint: str = "") -> Optional[Dict]:
         """Download video in specific format."""
         suffix = f".{ext_hint}" if ext_hint else ""
-        path, info = await asyncio.to_thread(self._download_to_file, url, format_id, suffix)
+        try:
+            path, info = await asyncio.to_thread(self._download_to_file, url, format_id, suffix)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("yt-dlp failed for url=%s format_id=%s: %s", url, format_id, exc)
+            raise RuntimeError("Failed to download requested YouTube format.") from exc
         if not path:
             return None
         return {
