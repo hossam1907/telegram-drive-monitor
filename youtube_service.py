@@ -16,6 +16,14 @@ class YouTubeService:
     def __init__(self) -> None:
         self.client = httpx.AsyncClient(timeout=30.0)
 
+    async def __aenter__(self) -> "YouTubeService":
+        """Allow use as an async context manager."""
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        """Close the underlying client on context exit."""
+        await self.close()
+
     async def get_channel_playlists(self, channel_url: str) -> List[Dict]:
         """Extract playlists from a YouTube channel playlists page."""
         try:
@@ -54,10 +62,7 @@ class YouTubeService:
             videos: List[Dict] = []
             seen_video_ids = set()
 
-            for idx, link in enumerate(
-                soup.find_all("a", href=re.compile(r"/watch\?v=[a-zA-Z0-9_-]+")),
-                start=1,
-            ):
+            for link in soup.find_all("a", href=re.compile(r"/watch\?v=[a-zA-Z0-9_-]+")):
                 video_url = link.get("href", "")
                 video_id = self._extract_video_id(video_url)
                 video_title = link.get("title") or link.get_text(strip=True)

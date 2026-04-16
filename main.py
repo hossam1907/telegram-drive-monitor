@@ -78,36 +78,43 @@ COURSE_SEEDS = [
         "course_name": "Digital Control Systems",
         "course_code": "EPE3090",
         "description": "Digital Control Systems EPE3090",
+        "youtube_channel_id": "https://www.youtube.com/@CUFE_EPE_27",
     },
     {
         "course_name": "Economics of Power Generation",
         "course_code": "EPE3080",
         "description": "Economics of Power Generation EPE3080",
+        "youtube_channel_id": "https://www.youtube.com/@CUFE_EPE_27",
     },
     {
         "course_name": "Electives",
         "course_code": "ELECTIVES",
         "description": "Electives",
+        "youtube_channel_id": "https://www.youtube.com/@CUFE_EPE26",
     },
     {
         "course_name": "Electrical Communication Systems",
         "course_code": "ELC3181",
         "description": "Electrical Communication Systems ELC3181",
+        "youtube_channel_id": "https://www.youtube.com/@CUFE_EPE26",
     },
     {
         "course_name": "Electrical Machines3",
         "course_code": "EPE3070",
         "description": "Electrical Machines3 EPE3070",
+        "youtube_channel_id": "https://www.youtube.com/@cufeepe2562",
     },
     {
         "course_name": "Power Systems 2",
         "course_code": "EPE3060",
         "description": "Power Systems 2 (3060)",
+        "youtube_channel_id": "https://www.youtube.com/@cufeepe2562",
     },
     {
         "course_name": "Protection",
         "course_code": "EPE3100",
         "description": "Protection EPE3100",
+        "youtube_channel_id": "https://www.youtube.com/@CUFE_EPE_27",
     },
 ]
 
@@ -408,19 +415,6 @@ async def cmd_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-def _build_course_lookup(courses: List[Dict]) -> Dict[str, Dict]:
-    """Build normalized lookup entries for course matching."""
-    lookup = {}
-    for course in courses:
-        code = (course.get("course_code") or "").upper()
-        name = (course.get("course_name") or "").upper()
-        description = (course.get("description") or "").upper()
-        for key in (code, name, description):
-            if key:
-                lookup[key] = course
-    return lookup
-
-
 def _match_course_for_title(title: str, courses: List[Dict]) -> Optional[Dict]:
     """Find the best matching course for a playlist/video title."""
     title_upper = title.upper()
@@ -437,12 +431,12 @@ def _match_course_for_title(title: str, courses: List[Dict]) -> Optional[Dict]:
 @admin_only
 async def cmd_setup_courses(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Create/refresh the predefined 7 courses."""
-    for idx, seed in enumerate(COURSE_SEEDS):
+    for seed in COURSE_SEEDS:
         database.add_course(
             course_name=seed["course_name"],
             course_code=seed["course_code"],
             description=seed["description"],
-            youtube_channel_id=YOUTUBE_CHANNELS[idx % len(YOUTUBE_CHANNELS)],
+            youtube_channel_id=seed["youtube_channel_id"],
         )
     await update.message.reply_text(
         "✅ Courses setup complete\\. Added/updated 7 courses\\.",
@@ -515,14 +509,26 @@ async def cmd_courses(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     lines = ["📚 *Available Courses:*\n"]
+    all_files = get_all_files(limit=5000)
+    drive_counts: Dict[str, int] = {}
+    course_codes = [
+        (course.get("course_code") or "").upper()
+        for course in courses
+        if course.get("course_code")
+    ]
+    for item in all_files:
+        file_name_upper = (item.get("name") or "").upper()
+        for code in course_codes:
+            if code in file_name_upper:
+                drive_counts[code] = drive_counts.get(code, 0) + 1
     for idx, course in enumerate(courses, start=1):
         code = course.get("course_code") or "N/A"
         course_id = int(course["course_id"])
         video_total = database.get_course_video_count(course_id)
-        drive_matches = db_search_files(code, limit=200) if code != "N/A" else []
+        drive_count = drive_counts.get(code.upper(), 0) if code != "N/A" else 0
         lines.append(
             f"{idx}\\. *{escape_markdown(code)}* — {escape_markdown(course['course_name'])}\n"
-            f"   📁 Drive Materials: {escape_markdown(str(len(drive_matches)))}"
+            f"   📁 Drive Materials: {escape_markdown(str(drive_count))}"
             f" \\| 📺 Videos: {escape_markdown(str(video_total))}"
         )
 
@@ -565,7 +571,9 @@ async def cmd_course(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     if playlists:
         for playlist in playlists[:8]:
-            count = playlist.get("video_count") or len(database.get_playlist_videos(playlist["playlist_id"]))
+            count = playlist.get("video_count")
+            if count is None:
+                count = 0
             lines.append(
                 f"• {escape_markdown(playlist['playlist_name'])} "
                 f"\\({escape_markdown(str(count))} videos\\)"
@@ -862,7 +870,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         if not message:
             await query.answer("Broadcast message expired. Retry /broadcast.", show_alert=True)
             return
-        recipients = sorted(set(ADMIN_USER_IDS + database.get_approved_users()))
+        recipients = sorted(set(list(ADMIN_USER_IDS) + database.get_approved_users()))
         sent = 0
         for recipient in recipients:
             try:
