@@ -139,11 +139,8 @@ class CommandMarkdownFormattingTests(unittest.TestCase):
 
         reply_text.assert_awaited_once()
         text = reply_text.await_args.args[0]
-        self.assertIn("Hello Alice\\! Welcome to Drive Monitor Bot\\.", text)
-        self.assertEqual(
-            reply_text.await_args.kwargs["parse_mode"],
-            self.main.ParseMode.MARKDOWN_V2,
-        )
+        self.assertIn("Hello Alice! Welcome to Drive Monitor Bot.", text)
+        self.assertEqual(reply_text.await_args.kwargs, {})
         self.assertIn("Available commands:", text)
 
     def test_cmd_start_for_unapproved_user_shows_access_request(self) -> None:
@@ -161,10 +158,7 @@ class CommandMarkdownFormattingTests(unittest.TestCase):
         text = reply_text.await_args.args[0]
         self.assertIn("To access this bot, please request access:", text)
         self.assertIn("/request <message>", text)
-        self.assertEqual(
-            reply_text.await_args.kwargs["parse_mode"],
-            self.main.ParseMode.MARKDOWN_V2,
-        )
+        self.assertEqual(reply_text.await_args.kwargs, {})
 
     def test_cmd_courses_markdown_text(self) -> None:
         reply_text = AsyncMock()
