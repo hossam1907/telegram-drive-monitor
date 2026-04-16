@@ -64,12 +64,21 @@ class CourseManagementDatabaseTests(unittest.TestCase):
             video_title="Lecture 1",
             video_url="https://www.youtube.com/watch?v=VID001",
             video_order=1,
+            duration="PT15M30S",
+            thumbnail_url="https://img.youtube.com/vi/VID001/hqdefault.jpg",
+            view_count=1234,
         )
 
         playlists = self.database.get_course_playlists(course_id)
         self.assertEqual(len(playlists), 1)
         videos = self.database.get_playlist_videos("PL123")
         self.assertEqual(len(videos), 1)
+        self.assertEqual(videos[0]["duration"], "PT15M30S")
+        self.assertEqual(videos[0]["view_count"], 1234)
+        self.assertEqual(
+            videos[0]["thumbnail_url"],
+            "https://img.youtube.com/vi/VID001/hqdefault.jpg",
+        )
         self.assertEqual(self.database.get_course_video_count(course_id), 1)
 
         inserted = self.database.enroll_user_in_course(user_id=99, course_id=course_id)

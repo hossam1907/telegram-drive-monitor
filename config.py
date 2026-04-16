@@ -129,6 +129,9 @@ DATABASE_PATH: str = os.getenv("DATABASE_PATH", "drive_monitor.db")
 # HTTP request timeout in seconds
 REQUEST_TIMEOUT: int = _get_int("REQUEST_TIMEOUT", 30)
 
+# YouTube Data API key (required for /extract_youtube)
+YOUTUBE_API_KEY: str = os.getenv("YOUTUBE_API_KEY", "")
+
 # ---------------------------------------------------------------------------
 # Google Drive API constants
 # ---------------------------------------------------------------------------

@@ -32,6 +32,7 @@ from config import (
     POLL_INTERVAL,
     TELEGRAM_BOT_TOKEN,
     TEMP_DIR,
+    YOUTUBE_API_KEY,
 )
 import database
 from database import (
@@ -47,6 +48,7 @@ from database import (
 )
 from google_drive_service import GoogleDriveService
 from youtube_service import YouTubeService
+from youtube_downloader import YouTubeDownloader
 from utils import (
     build_file_keyboard,
     build_files_keyboard,
@@ -66,6 +68,7 @@ logger = logging.getLogger(__name__)
 
 # Module-level Drive service instance (created in post_init)
 _drive: Optional[GoogleDriveService] = None
+_yt_downloader = YouTubeDownloader()
 
 YOUTUBE_CHANNELS = [
     "https://www.youtube.com/@CUFE_EPE_27",
@@ -206,6 +209,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/course <code> \\- Course details\n"
         "/setup_courses \\- Setup courses \\(admin\\)\n"
         "/extract_youtube \\- Extract YouTube \\(admin\\)\n"
+        "/download_youtube <url> \\- Download YouTube video\n"
         "/broadcast <msg> \\- Broadcast \\(admin\\)\n"
         "/broadcast_status \\- Broadcast status \\(admin\\)\n"
     )
@@ -446,6 +450,13 @@ async def cmd_setup_courses(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 @admin_only
 async def cmd_extract_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Extract playlists/videos from configured channels and map to courses."""
+    if not YOUTUBE_API_KEY:
+        await update.message.reply_text(
+            "❌ `YOUTUBE_API_KEY` is missing in your environment\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
     courses = database.get_all_courses()
     if not courses:
         await update.message.reply_text(
@@ -455,7 +466,7 @@ async def cmd_extract_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     status_msg = await update.message.reply_text("⏳ Extracting YouTube playlists and videos…")
-    service = YouTubeService()
+    service = YouTubeService(YOUTUBE_API_KEY)
     playlist_count = 0
     video_count = 0
 
@@ -483,6 +494,9 @@ async def cmd_extract_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE
                         video_title=video["title"],
                         video_url=video["url"],
                         video_order=video["order"],
+                        duration=video.get("duration"),
+                        thumbnail_url=video.get("thumbnail_url"),
+                        view_count=video.get("view_count"),
                     )
                     video_count += 1
     finally:
@@ -493,6 +507,71 @@ async def cmd_extract_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"📺 Playlists processed: *{playlist_count}*\n"
         f"🎬 Videos processed: *{video_count}*",
         parse_mode=ParseMode.MARKDOWN_V2,
+    )
+
+
+def _is_youtube_url(url: str) -> bool:
+    return "youtube.com/" in url or "youtu.be/" in url
+
+
+@approved_only
+async def cmd_download_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Download YouTube video with quality selection."""
+    if update.message is None:
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "ℹ️ Usage: `/download_youtube <url>`",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+    url = context.args[0].strip()
+    if not _is_youtube_url(url):
+        await update.message.reply_text(
+            "❌ Invalid YouTube URL\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+    status_msg = await update.message.reply_text("⏳ Fetching available qualities…")
+    try:
+        formats = await _yt_downloader.get_formats(url)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to fetch YouTube formats for %s: %s", url, exc)
+        await status_msg.edit_text(
+            "❌ Could not fetch video formats\\. Check the link and try again\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+    if not formats:
+        await status_msg.edit_text(
+            "❌ No downloadable formats found for this video\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+    request_id = str(int(datetime.now(timezone.utc).timestamp() * 1000))
+    downloads = context.user_data.setdefault("youtube_downloads", {})
+    downloads[request_id] = {"url": url, "formats": formats}
+
+    rows = []
+    for idx, fmt in enumerate(formats):
+        size_label = f" • {format_size(fmt['filesize'])}" if fmt.get("filesize") else ""
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{fmt['label']}{size_label}",
+                    callback_data=f"yt:{request_id}:{idx}",
+                )
+            ]
+        )
+
+    await status_msg.edit_text(
+        "🎞️ Choose quality:",
+        reply_markup=InlineKeyboardMarkup(rows),
     )
 
 
@@ -765,6 +844,95 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     elif data.startswith("download:"):
         file_id = data.split(":", 1)[1]
         await _process_download(context.bot, query.message.chat_id, file_id)
+
+    elif data.startswith("yt:"):
+        parts = data.split(":")
+        if len(parts) != 3:
+            await query.answer("Invalid format selection.", show_alert=True)
+            return
+        request_id, fmt_index_raw = parts[1], parts[2]
+        downloads = context.user_data.get("youtube_downloads", {})
+        payload = downloads.get(request_id)
+        if not payload:
+            await query.answer("This download request expired. Please retry.", show_alert=True)
+            return
+        try:
+            fmt_index = int(fmt_index_raw)
+            selected = payload["formats"][fmt_index]
+        except (TypeError, ValueError, IndexError, KeyError):
+            await query.answer("Invalid format.", show_alert=True)
+            return
+
+        await query.edit_message_text("⏳ Downloading selected format…")
+        downloaded_path: Optional[str] = None
+        try:
+            result = await _yt_downloader.download(
+                url=payload["url"],
+                format_id=selected["format_id"],
+                ext_hint=selected.get("ext", ""),
+            )
+            if not result:
+                await query.edit_message_text(
+                    "❌ Could not download this format\\. Please try another one\\.",
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                )
+                return
+
+            downloaded_path = result["path"]
+            file_size = os.path.getsize(downloaded_path)
+            if file_size > MAX_FILE_SIZE:
+                smaller = [
+                    fmt for fmt in payload["formats"]
+                    if fmt.get("filesize") and int(fmt["filesize"]) < MAX_FILE_SIZE
+                ]
+                suggestion = (
+                    f"\nTry: {smaller[-1]['label']}" if smaller else "\nTry a lower quality option."
+                )
+                await query.edit_message_text(
+                    (
+                        f"⚠️ Downloaded file is too large for Telegram "
+                        f"\\({escape_markdown(format_size(file_size))} > 50 MB\\)\\.{suggestion}"
+                    ),
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                )
+                return
+
+            caption = (
+                f"🎬 *{escape_markdown(result.get('title', 'YouTube Video'))}*\n"
+                f"📦 {escape_markdown(format_size(file_size))}\n"
+                f"🎞️ {escape_markdown(selected['label'])}"
+            )
+            await query.edit_message_text("📤 Uploading to Telegram…")
+            with open(downloaded_path, "rb") as fh:
+                if selected.get("audio_only"):
+                    await context.bot.send_audio(
+                        chat_id=query.message.chat_id,
+                        audio=fh,
+                        caption=caption,
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                        filename=os.path.basename(downloaded_path),
+                    )
+                else:
+                    await context.bot.send_video(
+                        chat_id=query.message.chat_id,
+                        video=fh,
+                        caption=caption,
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                    )
+            await query.edit_message_text("✅ Download complete.")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("YouTube download failed for callback %s: %s", data, exc)
+            await query.edit_message_text(
+                "❌ Download failed\\. Please try another format or link\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+        finally:
+            if downloaded_path and os.path.exists(downloaded_path):
+                try:
+                    os.remove(downloaded_path)
+                except OSError as exc:
+                    logger.debug("Failed to remove YouTube temp file %s: %s", downloaded_path, exc)
+            downloads.pop(request_id, None)
 
     elif data.startswith("folder:"):
         # Open a subfolder — push it onto the nav stack, determine parent before appending
@@ -1574,6 +1742,7 @@ def main() -> None:
     app.add_handler(CommandHandler("links", cmd_links))
     app.add_handler(CommandHandler("setup_courses", cmd_setup_courses))
     app.add_handler(CommandHandler("extract_youtube", cmd_extract_youtube))
+    app.add_handler(CommandHandler("download_youtube", cmd_download_youtube))
     app.add_handler(CommandHandler("courses", cmd_courses))
     app.add_handler(CommandHandler("course", cmd_course))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
