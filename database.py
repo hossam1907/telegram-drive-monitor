@@ -59,6 +59,61 @@ CREATE TABLE IF NOT EXISTS access_requests (
     reviewed_at      TIMESTAMP,
     reviewed_by      INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS courses (
+    course_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    course_name        TEXT UNIQUE NOT NULL,
+    course_code        TEXT UNIQUE,
+    description        TEXT,
+    drive_folder_id    TEXT,
+    youtube_channel_id TEXT,
+    created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS youtube_playlists (
+    playlist_id    TEXT PRIMARY KEY,
+    course_id      INTEGER,
+    playlist_name  TEXT NOT NULL,
+    playlist_url   TEXT,
+    video_count    INTEGER,
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (course_id) REFERENCES courses(course_id)
+);
+
+CREATE TABLE IF NOT EXISTS youtube_videos (
+    video_id        TEXT PRIMARY KEY,
+    playlist_id     TEXT,
+    course_id       INTEGER,
+    video_title     TEXT NOT NULL,
+    video_url       TEXT NOT NULL,
+    video_order     INTEGER,
+    duration        TEXT,
+    thumbnail_url   TEXT,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (playlist_id) REFERENCES youtube_playlists(playlist_id),
+    FOREIGN KEY (course_id) REFERENCES courses(course_id)
+);
+
+CREATE TABLE IF NOT EXISTS broadcast_messages (
+    message_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    sender_id          INTEGER NOT NULL,
+    message_text       TEXT NOT NULL,
+    target_type        TEXT DEFAULT 'all',
+    target_course_id   INTEGER,
+    sent_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status             TEXT DEFAULT 'sent',
+    delivery_count     INTEGER DEFAULT 0,
+    FOREIGN KEY (target_course_id) REFERENCES courses(course_id)
+);
+
+CREATE TABLE IF NOT EXISTS user_enrollments (
+    enrollment_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id          INTEGER NOT NULL,
+    course_id        INTEGER NOT NULL,
+    enrolled_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, course_id),
+    FOREIGN KEY (course_id) REFERENCES courses(course_id)
+);
 """
 
 
@@ -444,6 +499,251 @@ def get_approved_users() -> List[int]:
     try:
         rows = conn.execute(
             "SELECT user_id FROM access_requests WHERE status = 'approved' ORDER BY user_id"
+        ).fetchall()
+        return [int(row["user_id"]) for row in rows]
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Course management
+# ---------------------------------------------------------------------------
+
+def add_course(course_name: str, course_code: Optional[str], drive_folder_id: Optional[str] = None,
+               youtube_channel_id: Optional[str] = None,
+               description: Optional[str] = None) -> int:
+    """Add or update a course and return its ID."""
+    with _transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO courses (course_name, course_code, description, drive_folder_id, youtube_channel_id)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(course_name) DO UPDATE SET
+                course_code = excluded.course_code,
+                description = excluded.description,
+                drive_folder_id = excluded.drive_folder_id,
+                youtube_channel_id = excluded.youtube_channel_id
+            """,
+            (course_name, course_code, description, drive_folder_id, youtube_channel_id),
+        )
+        row = conn.execute(
+            "SELECT course_id FROM courses WHERE course_name = ?",
+            (course_name,),
+        ).fetchone()
+        return int(row["course_id"])
+
+
+def get_all_courses() -> List[Dict]:
+    """Get all courses ordered by course code then name."""
+    conn = _get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT course_id, course_name, course_code, description, drive_folder_id,
+                   youtube_channel_id, created_at
+            FROM courses
+            ORDER BY course_code IS NULL, course_code, course_name
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_course_by_code(course_code: str) -> Optional[Dict]:
+    """Get course by course code (case-insensitive)."""
+    conn = _get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT course_id, course_name, course_code, description, drive_folder_id,
+                   youtube_channel_id, created_at
+            FROM courses
+            WHERE UPPER(course_code) = UPPER(?)
+            """,
+            (course_code,),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_course_by_id(course_id: int) -> Optional[Dict]:
+    """Get course by ID."""
+    conn = _get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT course_id, course_name, course_code, description, drive_folder_id,
+                   youtube_channel_id, created_at
+            FROM courses
+            WHERE course_id = ?
+            """,
+            (course_id,),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def add_youtube_playlist(playlist_id: str, course_id: Optional[int], playlist_name: str,
+                         playlist_url: Optional[str], video_count: Optional[int]) -> None:
+    """Add or update a YouTube playlist."""
+    with _transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO youtube_playlists (playlist_id, course_id, playlist_name, playlist_url, video_count)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(playlist_id) DO UPDATE SET
+                course_id = excluded.course_id,
+                playlist_name = excluded.playlist_name,
+                playlist_url = excluded.playlist_url,
+                video_count = excluded.video_count
+            """,
+            (playlist_id, course_id, playlist_name, playlist_url, video_count),
+        )
+
+
+def get_course_playlists(course_id: int) -> List[Dict]:
+    """Get all playlists for a course."""
+    conn = _get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT playlist_id, course_id, playlist_name, playlist_url, video_count, created_at
+            FROM youtube_playlists
+            WHERE course_id = ?
+            ORDER BY playlist_name
+            """,
+            (course_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def add_youtube_video(video_id: str, playlist_id: Optional[str], course_id: Optional[int], video_title: str,
+                      video_url: str, video_order: Optional[int]) -> None:
+    """Add or update a YouTube video."""
+    with _transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO youtube_videos (video_id, playlist_id, course_id, video_title, video_url, video_order)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(video_id) DO UPDATE SET
+                playlist_id = excluded.playlist_id,
+                course_id = excluded.course_id,
+                video_title = excluded.video_title,
+                video_url = excluded.video_url,
+                video_order = excluded.video_order
+            """,
+            (video_id, playlist_id, course_id, video_title, video_url, video_order),
+        )
+
+
+def get_playlist_videos(playlist_id: str) -> List[Dict]:
+    """Get all videos in a playlist."""
+    conn = _get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT video_id, playlist_id, course_id, video_title, video_url, video_order,
+                   duration, thumbnail_url, created_at
+            FROM youtube_videos
+            WHERE playlist_id = ?
+            ORDER BY video_order IS NULL, video_order, video_title
+            """,
+            (playlist_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_course_video_count(course_id: int) -> int:
+    """Return total number of videos linked to a course."""
+    conn = _get_connection()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM youtube_videos WHERE course_id = ?",
+            (course_id,),
+        ).fetchone()
+        return int(row["cnt"])
+    finally:
+        conn.close()
+
+
+def send_broadcast(sender_id: int, message_text: str, target_type: str,
+                   target_course_id: Optional[int] = None, delivery_count: int = 0) -> int:
+    """Record broadcast message and return message ID."""
+    with _transaction() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO broadcast_messages (sender_id, message_text, target_type, target_course_id, delivery_count)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (sender_id, message_text, target_type, target_course_id, delivery_count),
+        )
+        return int(cursor.lastrowid)
+
+
+def get_recent_broadcasts(limit: int = 10) -> List[Dict]:
+    """Return recent broadcast messages with course metadata."""
+    conn = _get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT b.message_id, b.sender_id, b.message_text, b.target_type, b.target_course_id,
+                   b.sent_at, b.status, b.delivery_count, c.course_name, c.course_code
+            FROM broadcast_messages b
+            LEFT JOIN courses c ON c.course_id = b.target_course_id
+            ORDER BY b.sent_at DESC, b.message_id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_user_courses(user_id: int) -> List[Dict]:
+    """Get courses for a user."""
+    conn = _get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT c.course_id, c.course_name, c.course_code, c.description, c.drive_folder_id,
+                   c.youtube_channel_id, c.created_at
+            FROM user_enrollments e
+            JOIN courses c ON c.course_id = e.course_id
+            WHERE e.user_id = ?
+            ORDER BY c.course_code IS NULL, c.course_code, c.course_name
+            """,
+            (user_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def enroll_user_in_course(user_id: int, course_id: int) -> bool:
+    """Enroll user in course. Returns True if inserted, False if already enrolled."""
+    with _transaction() as conn:
+        cursor = conn.execute(
+            "INSERT OR IGNORE INTO user_enrollments (user_id, course_id) VALUES (?, ?)",
+            (user_id, course_id),
+        )
+        return cursor.rowcount > 0
+
+
+def get_course_enrolled_users(course_id: int) -> List[int]:
+    """Get all user IDs enrolled in a course."""
+    conn = _get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT user_id FROM user_enrollments WHERE course_id = ? ORDER BY user_id",
+            (course_id,),
         ).fetchall()
         return [int(row["user_id"]) for row in rows]
     finally:

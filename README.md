@@ -114,6 +114,12 @@ python main.py
 | `/search <name>` | Search for files by name substring |
 | `/monitor` | Toggle monitoring on / off |
 | `/status` | Show monitoring statistics and last poll time |
+| `/setup_courses` | Seed the 7 predefined courses (admin only) |
+| `/extract_youtube` | Extract YouTube playlists/videos for courses (admin only) |
+| `/courses` | List all courses with Drive/YouTube counts |
+| `/course <code>` | Show course playlists/materials and enrollment button |
+| `/broadcast <message>` | Send a broadcast to all users or one course (admin only) |
+| `/broadcast_status` | Show recent broadcast delivery stats (admin only) |
 
 Admin users (`ADMIN_USER_IDS`) always have access. Other users must send
 `/request <message>` and be approved first.
