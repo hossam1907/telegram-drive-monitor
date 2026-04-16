@@ -4,6 +4,8 @@ import importlib
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 
 class CourseManagementDatabaseTests(unittest.TestCase):
@@ -23,8 +25,10 @@ class CourseManagementDatabaseTests(unittest.TestCase):
         os.environ["ADMIN_USER_IDS"] = "1"
         os.environ["DATABASE_PATH"] = cls.db_path
 
+        import config  # noqa: PLC0415
         import database  # noqa: PLC0415
 
+        importlib.reload(config)
         cls.database = importlib.reload(database)
         cls.database.init_db()
 
@@ -86,6 +90,88 @@ class CourseManagementDatabaseTests(unittest.TestCase):
         broadcasts = self.database.get_recent_broadcasts(limit=1)
         self.assertEqual(broadcasts[0]["target_type"], "course")
         self.assertEqual(broadcasts[0]["delivery_count"], 1)
+
+
+class CommandMarkdownFormattingTests(unittest.TestCase):
+    """Validate MarkdownV2-safe formatting for key command handlers."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.temp_dir = tempfile.TemporaryDirectory()
+        cls.creds_path = os.path.join(cls.temp_dir.name, "creds.json")
+        with open(cls.creds_path, "w", encoding="utf-8") as fh:
+            fh.write("{}")
+
+        os.environ["TELEGRAM_BOT_TOKEN"] = "token"
+        os.environ["DRIVE_FOLDER_ID"] = "folder"
+        os.environ["GOOGLE_CREDENTIALS_FILE"] = cls.creds_path
+        os.environ["ADMIN_USER_IDS"] = "1"
+        os.environ["DATABASE_PATH"] = "/tmp/telegram_drive_monitor_handlers_test.db"
+
+        import config  # noqa: PLC0415
+        import main  # noqa: PLC0415
+
+        importlib.reload(config)
+        cls.main = importlib.reload(main)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.temp_dir.cleanup()
+
+    def test_cmd_start_markdown_text(self) -> None:
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=1, first_name="Alice"),
+            message=SimpleNamespace(reply_text=reply_text),
+        )
+        context = SimpleNamespace(args=[])
+
+        self.main.asyncio.run(self.main.cmd_start(update, context))
+
+        reply_text.assert_awaited_once()
+        text = reply_text.await_args.args[0]
+        self.assertIn("Hello Alice\\! Welcome to Drive Monitor Bot\\.", text)
+        self.assertEqual(
+            reply_text.await_args.kwargs["parse_mode"],
+            self.main.ParseMode.MARKDOWN_V2,
+        )
+
+    def test_cmd_courses_markdown_text(self) -> None:
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=1, first_name="Admin"),
+            message=SimpleNamespace(reply_text=reply_text),
+        )
+        context = SimpleNamespace(args=[])
+        courses = [{"course_code": "EPE3090", "course_name": "Digital Control Systems"}]
+
+        with patch.object(self.main.database, "get_all_courses", return_value=courses):
+            self.main.asyncio.run(self.main.cmd_courses(update, context))
+
+        reply_text.assert_awaited_once()
+        text = reply_text.await_args.args[0]
+        self.assertIn("*Available Courses:*", text)
+        self.assertIn("1\\. EPE3090 \\- Digital Control Systems", text)
+        self.assertEqual(
+            reply_text.await_args.kwargs["parse_mode"],
+            self.main.ParseMode.MARKDOWN_V2,
+        )
+
+    def test_cmd_broadcast_message_prompt(self) -> None:
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=1, first_name="Admin"),
+            message=SimpleNamespace(reply_text=reply_text),
+        )
+        context = SimpleNamespace(args=["New", "lecture", "notes"], user_data={})
+
+        self.main.asyncio.run(self.main.cmd_broadcast(update, context))
+
+        reply_text.assert_awaited_once()
+        self.assertEqual(
+            reply_text.await_args.args[0],
+            "Broadcast Message\n\nMessage: New lecture notes\n\nSend to:",
+        )
 
 
 if __name__ == "__main__":
