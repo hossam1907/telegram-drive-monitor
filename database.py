@@ -612,6 +612,13 @@ def add_youtube_playlist(playlist_id: str, course_id: Optional[int], playlist_na
         )
 
 
+def clear_playlist_course_assignments() -> None:
+    """Clear all stored YouTube playlist/video course links before re-matching."""
+    with _transaction() as conn:
+        conn.execute("UPDATE youtube_playlists SET course_id = NULL")
+        conn.execute("UPDATE youtube_videos SET course_id = NULL")
+
+
 def get_course_playlists(course_id: int) -> List[Dict]:
     """Get all playlists for a course."""
     conn = _get_connection()

@@ -6,6 +6,7 @@ and starts the background Drive polling task.
 """
 
 import asyncio
+from difflib import SequenceMatcher
 import functools
 import io
 import logging
@@ -13,7 +14,7 @@ import os
 import re
 import tempfile
 from datetime import datetime, timezone
-from typing import Callable, Dict, List, Optional, Tuple, TypedDict
+from typing import Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -69,15 +70,11 @@ from utils import (
 logger = logging.getLogger(__name__)
 
 
-class _CourseExtractionTotals(TypedDict):
-    course_code: str
-    course_name: str
-    playlists: int
-    videos: int
-
-
-COURSE_MATCH_MIN_KEYWORD_LENGTH = 2
-COURSE_MATCH_MIN_REQUIRED_MATCHES = 2
+COURSE_MATCH_THRESHOLD = 0.55
+# Weights are intentionally normalized to 1.0 for weighted-average scoring.
+COURSE_MATCH_TITLE_COVERAGE_WEIGHT = 0.40
+COURSE_MATCH_SIMILARITY_WEIGHT = 0.35
+COURSE_MATCH_COURSE_COVERAGE_WEIGHT = 0.25
 
 # Module-level Drive service instance (created in post_init)
 _drive: Optional[GoogleDriveService] = None
@@ -468,7 +465,7 @@ async def cmd_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def _match_course_for_title(title: str, courses: List[Dict]) -> Optional[Dict]:
-    """Find the best matching course for a playlist/video title."""
+    """Find the best matching course using code-first then fuzzy matching."""
     title_upper = (title or "").upper()
     code_matches = re.findall(r"\b([A-Z]{2,4}\d{3,4})\b", title_upper)
     code_to_course = {
@@ -484,40 +481,80 @@ def _match_course_for_title(title: str, courses: List[Dict]) -> Optional[Dict]:
                 return matched
         return None
 
+    roman_to_number = {
+        "I": "1",
+        "II": "2",
+        "III": "3",
+        "IV": "4",
+        "V": "5",
+    }
+    token_aliases = {
+        "ELECTRICAL": "ELECTRIC",
+        "LECTURES": "LECTURE",
+        "SECTIONS": "SECTION",
+        "SYSTEMS": "SYSTEM",
+    }
+    noise_tokens = {
+        "DR",
+        "PROF",
+        "PROFESSOR",
+        "DOCTOR",
+        "MR",
+        "MRS",
+        "MISS",
+        "LECTURE",
+        "SECTION",
+        "TUTORIAL",
+        "TUTORIALS",
+        "WITH",
+    }
+
+    def _tokenize(value: str) -> List[str]:
+        normalized = re.sub(r"[^A-Z0-9]+", " ", (value or "").upper())
+        normalized = re.sub(r"\b(?:DR|DOCTOR|PROF|PROFESSOR)\b.*$", " ", normalized)
+        raw_tokens = re.findall(r"[A-Z]+|\d+", normalized)
+        tokens: List[str] = []
+        for token in raw_tokens:
+            token = roman_to_number.get(token, token)
+            token = token_aliases.get(token, token)
+            if token in noise_tokens:
+                continue
+            if len(token) <= 1 and not token.isdigit():
+                continue
+            tokens.append(token)
+        return tokens
+
+    title_tokens = _tokenize(title_upper)
+    if not title_tokens:
+        return None
+    title_token_set = set(title_tokens)
+    title_compact = " ".join(title_tokens)
+
     best_match = None
-    best_score = 0
+    best_score = 0.0
 
     for course in courses:
-        course_name = (course.get("course_name") or "").upper()
-        if not course_name:
+        course_tokens = _tokenize((course.get("course_name") or "").upper())
+        if not course_tokens:
             continue
 
-        name_keywords = [
-            token
-            for token in re.findall(r"[A-Z0-9]+", course_name)
-            if token.isdigit() or len(token) > COURSE_MATCH_MIN_KEYWORD_LENGTH
-        ]
-        if not name_keywords:
+        course_token_set = set(course_tokens)
+        shared_tokens = title_token_set & course_token_set
+        if not shared_tokens:
             continue
 
-        matching_keywords = 0
-        for keyword in name_keywords:
-            if keyword in title_upper:
-                matching_keywords += 1
-                continue
-            if keyword.endswith("S") and len(keyword) > 3 and keyword[:-1] in title_upper:
-                matching_keywords += 1
-
-        required_matches = (
-            1
-            if len(name_keywords) == 1
-            else max(COURSE_MATCH_MIN_REQUIRED_MATCHES, (len(name_keywords) + 1) // 2)
+        title_coverage = len(shared_tokens) / len(title_token_set)
+        course_coverage = len(shared_tokens) / len(course_token_set)
+        similarity = SequenceMatcher(None, title_compact, " ".join(course_tokens)).ratio()
+        # Prefer direct keyword overlap, then string similarity, then course-token coverage.
+        combined_score = (
+            (title_coverage * COURSE_MATCH_TITLE_COVERAGE_WEIGHT)
+            + (similarity * COURSE_MATCH_SIMILARITY_WEIGHT)
+            + (course_coverage * COURSE_MATCH_COURSE_COVERAGE_WEIGHT)
         )
-        if matching_keywords < required_matches:
-            continue
 
-        if matching_keywords > best_score:
-            best_score = matching_keywords
+        if combined_score > best_score and combined_score >= COURSE_MATCH_THRESHOLD:
+            best_score = combined_score
             best_match = course
 
     return best_match
@@ -559,15 +596,25 @@ async def cmd_extract_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     status_msg = await update.message.reply_text("⏳ Extracting YouTube playlists and videos…")
     service = YouTubeService(YOUTUBE_API_KEY)
+    previous_assignments: Dict[str, int] = {}
+    for course in courses:
+        course_id = int(course["course_id"])
+        for playlist in database.get_course_playlists(course_id):
+            previous_assignments[playlist["playlist_id"]] = course_id
+
+    database.clear_playlist_course_assignments()
+
     total_playlists_found = 0
     matched_playlists = 0
+    moved_playlists = 0
+    newly_matched_playlists = 0
+    unchanged_playlists = 0
     skipped_playlists = 0
     unmatched_playlists = 0
     total_videos_processed = 0
     videos_added = 0
-    videos_skipped = 0
-    course_totals: Dict[Tuple[str, str], _CourseExtractionTotals] = {}
     playlist_events: List[str] = []
+    video_match_cache: Dict[str, Optional[Dict]] = {}
 
     try:
         total_channels = len(YOUTUBE_CHANNELS)
@@ -578,17 +625,7 @@ async def cmd_extract_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE
                 total_playlists_found += 1
                 total_videos_processed += len(videos)
                 matched_course = _match_course_for_title(playlist["name"], courses)
-                if not matched_course:
-                    if re.search(r"\b[A-Z]{2,4}\d{3,4}\b", (playlist.get("name") or "").upper()):
-                        skipped_playlists += 1
-                        playlist_events.append(f"⏭️ {playlist['name']} -> skipped (different course code)")
-                    else:
-                        unmatched_playlists += 1
-                        playlist_events.append(f"❌ {playlist['name']} -> no course match")
-                    videos_skipped += len(videos)
-                    continue
-
-                course_id = matched_course["course_id"]
+                course_id = matched_course["course_id"] if matched_course else None
                 database.add_youtube_playlist(
                     playlist_id=playlist["id"],
                     course_id=course_id,
@@ -596,28 +633,40 @@ async def cmd_extract_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE
                     playlist_url=playlist["url"],
                     video_count=len(videos),
                 )
-                matched_playlists += 1
 
-                course_code = matched_course.get("course_code") or "N/A"
-                course_name = matched_course.get("course_name") or "Unnamed Course"
-                course_key = (course_code, course_name)
-                if course_key not in course_totals:
-                    course_totals[course_key] = {
-                        "course_code": course_code,
-                        "course_name": course_name,
-                        "playlists": 0,
-                        "videos": 0,
-                    }
-                course_totals[course_key]["playlists"] += 1
-                playlist_events.append(
-                    f"✅ {playlist['name']} -> {course_code} ({course_name})"
-                )
+                if matched_course:
+                    matched_playlists += 1
+                    previous_course_id = previous_assignments.get(playlist["id"])
+                    if previous_course_id is None:
+                        newly_matched_playlists += 1
+                    elif previous_course_id != course_id:
+                        moved_playlists += 1
+                    else:
+                        unchanged_playlists += 1
+
+                    course_code = matched_course.get("course_code") or "N/A"
+                    course_name = matched_course.get("course_name") or "Unnamed Course"
+                    playlist_events.append(f"✅ {playlist['name']} -> {course_code} ({course_name})")
+                elif re.search(r"\b[A-Z]{2,4}\d{3,4}\b", (playlist.get("name") or "").upper()):
+                    skipped_playlists += 1
+                    playlist_events.append(f"⏭️ {playlist['name']} -> skipped (different course code)")
+                else:
+                    unmatched_playlists += 1
+                    playlist_events.append(f"❌ {playlist['name']} -> no course match")
 
                 for video in videos:
+                    video_title = video["title"]
+                    if matched_course:
+                        video_course = matched_course
+                    elif video_title in video_match_cache:
+                        video_course = video_match_cache[video_title]
+                    else:
+                        video_course = _match_course_for_title(video_title, courses)
+                        video_match_cache[video_title] = video_course
                     database.add_youtube_video(
                         video_id=video["id"],
                         playlist_id=playlist["id"],
-                        course_id=course_id,
+                        course_id=video_course["course_id"] if video_course else course_id,
                         video_title=video["title"],
                         video_url=video["url"],
                         video_order=video["order"],
@@ -626,7 +675,6 @@ async def cmd_extract_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE
                         view_count=video.get("view_count"),
                     )
                     videos_added += 1
-                    course_totals[course_key]["videos"] += 1
 
             await status_msg.edit_text(
                 "⏳ YouTube extraction in progress\n"
@@ -640,17 +688,18 @@ async def cmd_extract_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE
         await service.close()
 
     course_lines = []
-    for _, stats in sorted(
-        course_totals.items(),
-        key=lambda item: (
-            -item[1]["videos"],
-            str(item[1]["course_code"]),
-        ),
-    ):
+    for course in courses:
+        course_id = int(course["course_id"])
+        playlists = database.get_course_playlists(course_id)
+        if not playlists:
+            continue
+        video_count_for_course = sum(int(playlist.get("video_count") or 0) for playlist in playlists)
+        course_code = course.get("course_code") or "N/A"
+        course_name = course.get("course_name") or "Unnamed Course"
         course_lines.append(
-            f"• {stats['course_code']} ({stats['course_name']}): "
-            f"{stats['playlists']} {'playlist' if stats['playlists'] == 1 else 'playlists'}, "
-            f"{stats['videos']} {'video' if stats['videos'] == 1 else 'videos'}"
+            f"• {course_code} ({course_name}): "
+            f"{len(playlists)} {'playlist' if len(playlists) == 1 else 'playlists'}, "
+            f"{video_count_for_course} {'video' if video_count_for_course == 1 else 'videos'}"
         )
 
     if not course_lines:
@@ -667,9 +716,13 @@ async def cmd_extract_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"✅ Successfully Matched: {matched_playlists}\n"
         f"⏭️ Skipped (different course codes): {skipped_playlists}\n"
         f"❌ Unmatched (no course found): {unmatched_playlists}\n\n"
+        "🔄 UPDATES:\n"
+        f"↔️ Moved to different course: {moved_playlists}\n"
+        f"🆕 Newly matched: {newly_matched_playlists}\n"
+        f"✔️ Unchanged matches: {unchanged_playlists}\n\n"
         f"🎬 Total Videos Processed: {total_videos_processed}\n"
         f"✅ Videos Added: {videos_added}\n"
-        f"⏭️ Videos Skipped: {videos_skipped}\n\n"
+        "\n"
         "📚 By Course:\n"
         + "\n".join(course_lines)
         + "\n\n📋 Playlist Matching:\n"

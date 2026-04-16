@@ -118,6 +118,8 @@ class YouTubeFeatureTests(unittest.TestCase):
         courses = [
             {"course_id": 1, "course_code": "EPE3060", "course_name": "Power Systems 2"},
             {"course_id": 2, "course_code": "EPE3090", "course_name": "Digital Control Systems"},
+            {"course_id": 3, "course_code": "EPE3070", "course_name": "Electrical Machines3"},
+            {"course_id": 4, "course_code": "ELC3181", "course_name": "Electrical Communication Systems"},
         ]
 
         self.assertEqual(
@@ -128,6 +130,14 @@ class YouTubeFeatureTests(unittest.TestCase):
         self.assertEqual(
             self.main._match_course_for_title("Power System | Tutorials", courses)["course_code"],
             "EPE3060",
+        )
+        self.assertEqual(
+            self.main._match_course_for_title("Electric Machines iii | sections", courses)["course_code"],
+            "EPE3070",
+        )
+        self.assertEqual(
+            self.main._match_course_for_title("Communication Lectures | Dr. Mohammed Abdelghany", courses)["course_code"],
+            "ELC3181",
         )
         self.assertIsNone(self.main._match_course_for_title("Random Content", courses))
 
@@ -163,26 +173,39 @@ class YouTubeFeatureTests(unittest.TestCase):
             get_playlist_videos=AsyncMock(side_effect=lambda playlist_id: videos_by_playlist[playlist_id]),
             close=AsyncMock(),
         )
+        get_course_playlists_calls = {"count": 0}
+
+        def get_course_playlists_side_effect(course_id: int):
+            get_course_playlists_calls["count"] += 1
+            if get_course_playlists_calls["count"] <= len(courses):
+                return [{"playlist_id": "p1", "course_id": 1}] if course_id == 1 else []
+            return [{"playlist_id": "p1", "course_id": 1, "video_count": 2}] if course_id == 1 else []
 
         with (
             patch.object(self.main, "YOUTUBE_CHANNELS", ["https://www.youtube.com/@test"]),
             patch.object(self.main, "YouTubeService", return_value=service),
             patch.object(self.main.database, "get_all_courses", return_value=courses),
+            patch.object(self.main.database, "get_course_playlists", side_effect=get_course_playlists_side_effect),
+            patch.object(self.main.database, "clear_playlist_course_assignments") as clear_assignments,
             patch.object(self.main.database, "add_youtube_playlist") as add_playlist,
             patch.object(self.main.database, "add_youtube_video") as add_video,
         ):
             self.main.asyncio.run(self.main.cmd_extract_youtube(update, context))
 
-        add_playlist.assert_called_once()
-        self.assertEqual(add_video.call_count, 2)
+        clear_assignments.assert_called_once()
+        add_playlist.assert_called()
+        self.assertEqual(add_playlist.call_count, 3)
+        self.assertEqual(add_video.call_count, 4)
         final_text = status_message.edit_text.await_args_list[-1].args[0]
         self.assertIn("Total Playlists Found: 3", final_text)
         self.assertIn("Successfully Matched: 1", final_text)
         self.assertIn("Skipped (different course codes): 1", final_text)
         self.assertIn("Unmatched (no course found): 1", final_text)
+        self.assertIn("Moved to different course: 0", final_text)
+        self.assertIn("Newly matched: 0", final_text)
+        self.assertIn("Unchanged matches: 1", final_text)
         self.assertIn("Total Videos Processed: 4", final_text)
-        self.assertIn("Videos Added: 2", final_text)
-        self.assertIn("Videos Skipped: 2", final_text)
+        self.assertIn("Videos Added: 4", final_text)
         self.assertIn("EPE3060 (Power Systems 2): 1 playlist, 2 videos", final_text)
 
 
