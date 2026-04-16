@@ -116,6 +116,7 @@ python main.py
 | `/status` | Show monitoring statistics and last poll time |
 | `/setup_courses` | Seed the 7 predefined courses (admin only) |
 | `/extract_youtube` | Extract YouTube playlists/videos for courses (admin only) |
+| `/download_youtube <url>` | Download YouTube video/audio after choosing quality |
 | `/courses` | List all courses with Drive/YouTube counts |
 | `/course <code>` | Show course playlists/materials and enrollment button |
 | `/broadcast <message>` | Send a broadcast to all users or one course (admin only) |
@@ -139,6 +140,7 @@ Admin users (`ADMIN_USER_IDS`) always have access. Other users must send
 | `DATABASE_PATH` | ❌ | `drive_monitor.db` | SQLite database file path |
 | `LOG_LEVEL` | ❌ | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `REQUEST_TIMEOUT` | ❌ | `30` | API request timeout in seconds |
+| `YOUTUBE_API_KEY` | ❌ | empty | YouTube Data API key used by `/extract_youtube` |
 
 ---
 

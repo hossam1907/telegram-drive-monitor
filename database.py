@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS youtube_videos (
     video_url       TEXT NOT NULL,
     video_order     INTEGER,
     duration        TEXT,
+    view_count      INTEGER,
     thumbnail_url   TEXT,
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (playlist_id) REFERENCES youtube_playlists(playlist_id),
@@ -167,6 +168,13 @@ def init_db() -> None:
     """
     with _transaction() as conn:
         conn.executescript(_DDL)
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(youtube_videos)").fetchall()
+        }
+        if "view_count" not in columns:
+            conn.execute("ALTER TABLE youtube_videos ADD COLUMN view_count INTEGER")
+            logger.info("Database migration applied: added youtube_videos.view_count column.")
     logger.info("Database initialised at '%s'.", DATABASE_PATH)
 
 
@@ -623,21 +631,38 @@ def get_course_playlists(course_id: int) -> List[Dict]:
 
 
 def add_youtube_video(video_id: str, playlist_id: Optional[str], course_id: Optional[int], video_title: str,
-                      video_url: str, video_order: Optional[int]) -> None:
+                      video_url: str, video_order: Optional[int], duration: Optional[str] = None,
+                      thumbnail_url: Optional[str] = None, view_count: Optional[int] = None) -> None:
     """Add or update a YouTube video."""
     with _transaction() as conn:
         conn.execute(
             """
-            INSERT INTO youtube_videos (video_id, playlist_id, course_id, video_title, video_url, video_order)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO youtube_videos (
+                video_id, playlist_id, course_id, video_title, video_url, video_order, duration,
+                thumbnail_url, view_count
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(video_id) DO UPDATE SET
                 playlist_id = excluded.playlist_id,
                 course_id = excluded.course_id,
                 video_title = excluded.video_title,
                 video_url = excluded.video_url,
-                video_order = excluded.video_order
+                video_order = excluded.video_order,
+                duration = excluded.duration,
+                thumbnail_url = excluded.thumbnail_url,
+                view_count = excluded.view_count
             """,
-            (video_id, playlist_id, course_id, video_title, video_url, video_order),
+            (
+                video_id,
+                playlist_id,
+                course_id,
+                video_title,
+                video_url,
+                video_order,
+                duration,
+                thumbnail_url,
+                view_count,
+            ),
         )
 
 
@@ -648,7 +673,7 @@ def get_playlist_videos(playlist_id: str) -> List[Dict]:
         rows = conn.execute(
             """
             SELECT video_id, playlist_id, course_id, video_title, video_url, video_order,
-                   duration, thumbnail_url, created_at
+                   duration, thumbnail_url, view_count, created_at
             FROM youtube_videos
             WHERE playlist_id = ?
             ORDER BY video_order IS NULL, video_order, video_title
