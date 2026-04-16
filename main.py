@@ -13,7 +13,7 @@ import os
 import re
 import tempfile
 from datetime import datetime, timezone
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple, TypedDict
 from urllib.parse import urlparse
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -67,6 +67,17 @@ from utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _CourseExtractionTotals(TypedDict):
+    course_code: str
+    course_name: str
+    playlists: int
+    videos: int
+
+
+COURSE_MATCH_MIN_KEYWORD_LENGTH = 2
+COURSE_MATCH_MIN_REQUIRED_MATCHES = 2
 
 # Module-level Drive service instance (created in post_init)
 _drive: Optional[GoogleDriveService] = None
@@ -484,7 +495,7 @@ def _match_course_for_title(title: str, courses: List[Dict]) -> Optional[Dict]:
         name_keywords = [
             token
             for token in re.findall(r"[A-Z0-9]+", course_name)
-            if token.isdigit() or len(token) > 2
+            if token.isdigit() or len(token) > COURSE_MATCH_MIN_KEYWORD_LENGTH
         ]
         if not name_keywords:
             continue
@@ -497,7 +508,11 @@ def _match_course_for_title(title: str, courses: List[Dict]) -> Optional[Dict]:
             if keyword.endswith("S") and len(keyword) > 3 and keyword[:-1] in title_upper:
                 matching_keywords += 1
 
-        required_matches = 1 if len(name_keywords) == 1 else max(2, (len(name_keywords) + 1) // 2)
+        required_matches = (
+            1
+            if len(name_keywords) == 1
+            else max(COURSE_MATCH_MIN_REQUIRED_MATCHES, (len(name_keywords) + 1) // 2)
+        )
         if matching_keywords < required_matches:
             continue
 
@@ -551,7 +566,7 @@ async def cmd_extract_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE
     total_videos_processed = 0
     videos_added = 0
     videos_skipped = 0
-    course_totals: Dict[str, Dict[str, object]] = {}
+    course_totals: Dict[Tuple[str, str], _CourseExtractionTotals] = {}
     playlist_events: List[str] = []
 
     try:
@@ -585,7 +600,7 @@ async def cmd_extract_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE
 
                 course_code = matched_course.get("course_code") or "N/A"
                 course_name = matched_course.get("course_name") or "Unnamed Course"
-                course_key = f"{course_code}|{course_name}"
+                course_key = (course_code, course_name)
                 if course_key not in course_totals:
                     course_totals[course_key] = {
                         "course_code": course_code,
@@ -593,7 +608,7 @@ async def cmd_extract_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE
                         "playlists": 0,
                         "videos": 0,
                     }
-                course_totals[course_key]["playlists"] = int(course_totals[course_key]["playlists"]) + 1
+                course_totals[course_key]["playlists"] += 1
                 playlist_events.append(
                     f"✅ {playlist['name']} -> {course_code} ({course_name})"
                 )
@@ -611,7 +626,7 @@ async def cmd_extract_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE
                         view_count=video.get("view_count"),
                     )
                     videos_added += 1
-                    course_totals[course_key]["videos"] = int(course_totals[course_key]["videos"]) + 1
+                    course_totals[course_key]["videos"] += 1
 
             await status_msg.edit_text(
                 "⏳ YouTube extraction in progress\n"
@@ -628,13 +643,14 @@ async def cmd_extract_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE
     for _, stats in sorted(
         course_totals.items(),
         key=lambda item: (
-            -int(item[1]["videos"]),
+            -item[1]["videos"],
             str(item[1]["course_code"]),
         ),
     ):
         course_lines.append(
             f"• {stats['course_code']} ({stats['course_name']}): "
-            f"{stats['playlists']} playlists, {stats['videos']} videos"
+            f"{stats['playlists']} {'playlist' if stats['playlists'] == 1 else 'playlists'}, "
+            f"{stats['videos']} {'video' if stats['videos'] == 1 else 'videos'}"
         )
 
     if not course_lines:

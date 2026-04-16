@@ -183,7 +183,7 @@ class YouTubeFeatureTests(unittest.TestCase):
         self.assertIn("Total Videos Processed: 4", final_text)
         self.assertIn("Videos Added: 2", final_text)
         self.assertIn("Videos Skipped: 2", final_text)
-        self.assertIn("EPE3060 (Power Systems 2): 1 playlists, 2 videos", final_text)
+        self.assertIn("EPE3060 (Power Systems 2): 1 playlist, 2 videos", final_text)
 
 
 if __name__ == "__main__":
