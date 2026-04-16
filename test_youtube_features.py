@@ -114,6 +114,77 @@ class YouTubeFeatureTests(unittest.TestCase):
             ["1080p", "720p", "480p", "360p", "240p", "Audio"],
         )
 
+    def test_match_course_for_title_uses_code_then_fuzzy(self) -> None:
+        courses = [
+            {"course_id": 1, "course_code": "EPE3060", "course_name": "Power Systems 2"},
+            {"course_id": 2, "course_code": "EPE3090", "course_name": "Digital Control Systems"},
+        ]
+
+        self.assertEqual(
+            self.main._match_course_for_title("Power Systems 2 (EPE3060) | Tutorials", courses)["course_code"],
+            "EPE3060",
+        )
+        self.assertIsNone(self.main._match_course_for_title("Conversion (EPE1020) | Tutorials", courses))
+        self.assertEqual(
+            self.main._match_course_for_title("Power System | Tutorials", courses)["course_code"],
+            "EPE3060",
+        )
+        self.assertIsNone(self.main._match_course_for_title("Random Content", courses))
+
+    def test_cmd_extract_youtube_reports_matching_categories(self) -> None:
+        status_message = SimpleNamespace(edit_text=AsyncMock())
+        reply_text = AsyncMock(return_value=status_message)
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=1, first_name="Admin"),
+            message=SimpleNamespace(reply_text=reply_text),
+        )
+        context = SimpleNamespace(args=[], user_data={})
+
+        playlists = [
+            {"id": "p1", "name": "Power Systems 2 (EPE3060)", "url": "https://youtube.com/playlist?list=p1"},
+            {"id": "p2", "name": "Conversion (EPE1020)", "url": "https://youtube.com/playlist?list=p2"},
+            {"id": "p3", "name": "Random Content", "url": "https://youtube.com/playlist?list=p3"},
+        ]
+        videos_by_playlist = {
+            "p1": [
+                {"id": "v1", "title": "Lecture 1", "url": "https://youtube.com/watch?v=v1", "order": 1},
+                {"id": "v2", "title": "Lecture 2", "url": "https://youtube.com/watch?v=v2", "order": 2},
+            ],
+            "p2": [{"id": "v3", "title": "Other", "url": "https://youtube.com/watch?v=v3", "order": 1}],
+            "p3": [{"id": "v4", "title": "Misc", "url": "https://youtube.com/watch?v=v4", "order": 1}],
+        }
+        courses = [
+            {"course_id": 1, "course_code": "EPE3060", "course_name": "Power Systems 2"},
+            {"course_id": 2, "course_code": "EPE3090", "course_name": "Digital Control Systems"},
+        ]
+
+        service = SimpleNamespace(
+            get_channel_playlists=AsyncMock(return_value=playlists),
+            get_playlist_videos=AsyncMock(side_effect=lambda playlist_id: videos_by_playlist[playlist_id]),
+            close=AsyncMock(),
+        )
+
+        with (
+            patch.object(self.main, "YOUTUBE_CHANNELS", ["https://www.youtube.com/@test"]),
+            patch.object(self.main, "YouTubeService", return_value=service),
+            patch.object(self.main.database, "get_all_courses", return_value=courses),
+            patch.object(self.main.database, "add_youtube_playlist") as add_playlist,
+            patch.object(self.main.database, "add_youtube_video") as add_video,
+        ):
+            self.main.asyncio.run(self.main.cmd_extract_youtube(update, context))
+
+        add_playlist.assert_called_once()
+        self.assertEqual(add_video.call_count, 2)
+        final_text = status_message.edit_text.await_args_list[-1].args[0]
+        self.assertIn("Total Playlists Found: 3", final_text)
+        self.assertIn("Successfully Matched: 1", final_text)
+        self.assertIn("Skipped (different course codes): 1", final_text)
+        self.assertIn("Unmatched (no course found): 1", final_text)
+        self.assertIn("Total Videos Processed: 4", final_text)
+        self.assertIn("Videos Added: 2", final_text)
+        self.assertIn("Videos Skipped: 2", final_text)
+        self.assertIn("EPE3060 (Power Systems 2): 1 playlists, 2 videos", final_text)
+
 
 if __name__ == "__main__":
     unittest.main()
