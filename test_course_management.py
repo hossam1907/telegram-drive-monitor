@@ -142,6 +142,8 @@ class CommandMarkdownFormattingTests(unittest.TestCase):
         self.assertIn("Hello Alice! Welcome to Drive Monitor Bot.", text)
         self.assertEqual(reply_text.await_args.kwargs, {})
         self.assertIn("Available commands:", text)
+        self.assertIn("⚙️ ADMIN COMMANDS:", text)
+        self.assertIn("/broadcast <msg> - Broadcast message to all users", text)
 
     def test_cmd_start_for_unapproved_user_shows_access_request(self) -> None:
         reply_text = AsyncMock()
@@ -159,6 +161,23 @@ class CommandMarkdownFormattingTests(unittest.TestCase):
         self.assertIn("To access this bot, please request access:", text)
         self.assertIn("/request <message>", text)
         self.assertEqual(reply_text.await_args.kwargs, {})
+
+    def test_cmd_start_for_approved_non_admin_hides_admin_commands(self) -> None:
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=2, first_name="Bob"),
+            message=SimpleNamespace(reply_text=reply_text),
+        )
+        context = SimpleNamespace(args=[])
+
+        with patch.object(self.main.database, "is_user_approved", return_value=True):
+            self.main.asyncio.run(self.main.cmd_start(update, context))
+
+        reply_text.assert_awaited_once()
+        text = reply_text.await_args.args[0]
+        self.assertIn("Available commands:", text)
+        self.assertNotIn("/requests - Review pending access requests", text)
+        self.assertNotIn("/broadcast <msg> - Broadcast message to all users", text)
 
     def test_cmd_courses_markdown_text(self) -> None:
         reply_text = AsyncMock()
