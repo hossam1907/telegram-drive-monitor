@@ -114,6 +114,8 @@ class YouTubeDownloader:
         """
         fd, temp_path = tempfile.mkstemp(prefix="yt_", suffix=suffix)
         os.close(fd)
+        # For video selections, merge selected video stream with best audio when available.
+        # Fallback to best combined stream if merge cannot be resolved.
         format_selector = format_id if audio_only else f"{format_id}+bestaudio/best"
         options = {
             "quiet": True,
