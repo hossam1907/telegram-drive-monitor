@@ -12,7 +12,7 @@ import logging
 import os
 import tempfile
 from datetime import datetime, timezone
-from typing import Callable, Optional
+from typing import Callable, Dict, List, Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -46,6 +46,7 @@ from database import (
     delete_stale_files,
 )
 from google_drive_service import GoogleDriveService
+from youtube_service import YouTubeService
 from utils import (
     build_file_keyboard,
     build_files_keyboard,
@@ -65,6 +66,50 @@ logger = logging.getLogger(__name__)
 
 # Module-level Drive service instance (created in post_init)
 _drive: Optional[GoogleDriveService] = None
+
+YOUTUBE_CHANNELS = [
+    "https://www.youtube.com/@CUFE_EPE_27",
+    "https://www.youtube.com/@CUFE_EPE26",
+    "https://www.youtube.com/@cufeepe2562",
+]
+
+COURSE_SEEDS = [
+    {
+        "course_name": "Digital Control Systems",
+        "course_code": "EPE3090",
+        "description": "Digital Control Systems EPE3090",
+    },
+    {
+        "course_name": "Economics of Power Generation",
+        "course_code": "EPE3080",
+        "description": "Economics of Power Generation EPE3080",
+    },
+    {
+        "course_name": "Electives",
+        "course_code": "ELECTIVES",
+        "description": "Electives",
+    },
+    {
+        "course_name": "Electrical Communication Systems",
+        "course_code": "ELC3181",
+        "description": "Electrical Communication Systems ELC3181",
+    },
+    {
+        "course_name": "Electrical Machines3",
+        "course_code": "EPE3070",
+        "description": "Electrical Machines3 EPE3070",
+    },
+    {
+        "course_name": "Power Systems 2",
+        "course_code": "EPE3060",
+        "description": "Power Systems 2 (3060)",
+    },
+    {
+        "course_name": "Protection",
+        "course_code": "EPE3100",
+        "description": "Protection EPE3100",
+    },
+]
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +196,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• /monitor — Toggle monitoring on or off\n"
         "• /status — Show monitoring statistics\n"
         "• /links — Show important resource links\n"
+        "• /courses — Show available courses\n"
+        "• /course `<code>` — Show course details\n"
+        "• /setup_courses — Seed the 7 courses \\(admin\\)\n"
+        "• /extract_youtube — Extract YouTube playlists/videos \\(admin\\)\n"
+        "• /broadcast `<message>` — Broadcast to users \\(admin\\)\n"
+        "• /broadcast_status — Show recent broadcasts \\(admin\\)\n"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2)
 
@@ -357,6 +408,249 @@ async def cmd_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+def _build_course_lookup(courses: List[Dict]) -> Dict[str, Dict]:
+    """Build normalized lookup entries for course matching."""
+    lookup = {}
+    for course in courses:
+        code = (course.get("course_code") or "").upper()
+        name = (course.get("course_name") or "").upper()
+        description = (course.get("description") or "").upper()
+        for key in (code, name, description):
+            if key:
+                lookup[key] = course
+    return lookup
+
+
+def _match_course_for_title(title: str, courses: List[Dict]) -> Optional[Dict]:
+    """Find the best matching course for a playlist/video title."""
+    title_upper = title.upper()
+    for course in courses:
+        code = (course.get("course_code") or "").upper()
+        name = (course.get("course_name") or "").upper()
+        if code and code in title_upper:
+            return course
+        if name and any(part and part in title_upper for part in name.split()):
+            return course
+    return None
+
+
+@admin_only
+async def cmd_setup_courses(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Create/refresh the predefined 7 courses."""
+    for idx, seed in enumerate(COURSE_SEEDS):
+        database.add_course(
+            course_name=seed["course_name"],
+            course_code=seed["course_code"],
+            description=seed["description"],
+            youtube_channel_id=YOUTUBE_CHANNELS[idx % len(YOUTUBE_CHANNELS)],
+        )
+    await update.message.reply_text(
+        "✅ Courses setup complete\\. Added/updated 7 courses\\.",
+        parse_mode=ParseMode.MARKDOWN_V2,
+    )
+
+
+@admin_only
+async def cmd_extract_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Extract playlists/videos from configured channels and map to courses."""
+    courses = database.get_all_courses()
+    if not courses:
+        await update.message.reply_text(
+            "ℹ️ No courses found\\. Run /setup_courses first\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+    status_msg = await update.message.reply_text("⏳ Extracting YouTube playlists and videos…")
+    service = YouTubeService()
+    playlist_count = 0
+    video_count = 0
+
+    try:
+        for channel_url in YOUTUBE_CHANNELS:
+            playlists = await service.get_channel_playlists(channel_url)
+            for playlist in playlists:
+                matched_course = _match_course_for_title(playlist["name"], courses)
+                course_id = matched_course["course_id"] if matched_course else None
+                videos = await service.get_playlist_videos(playlist["id"])
+                database.add_youtube_playlist(
+                    playlist_id=playlist["id"],
+                    course_id=course_id,
+                    playlist_name=playlist["name"],
+                    playlist_url=playlist["url"],
+                    video_count=len(videos),
+                )
+                playlist_count += 1
+                for video in videos:
+                    video_course = matched_course or _match_course_for_title(video["title"], courses)
+                    database.add_youtube_video(
+                        video_id=video["id"],
+                        playlist_id=playlist["id"],
+                        course_id=video_course["course_id"] if video_course else course_id,
+                        video_title=video["title"],
+                        video_url=video["url"],
+                        video_order=video["order"],
+                    )
+                    video_count += 1
+    finally:
+        await service.close()
+
+    await status_msg.edit_text(
+        f"✅ YouTube extraction complete\\.\n"
+        f"📺 Playlists processed: *{playlist_count}*\n"
+        f"🎬 Videos processed: *{video_count}*",
+        parse_mode=ParseMode.MARKDOWN_V2,
+    )
+
+
+@approved_only
+async def cmd_courses(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show all available courses with content counts."""
+    courses = database.get_all_courses()
+    if not courses:
+        await update.message.reply_text(
+            "📭 No courses available yet\\. Ask admin to run /setup_courses\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+    lines = ["📚 *Available Courses:*\n"]
+    for idx, course in enumerate(courses, start=1):
+        code = course.get("course_code") or "N/A"
+        course_id = int(course["course_id"])
+        video_total = database.get_course_video_count(course_id)
+        drive_matches = db_search_files(code, limit=200) if code != "N/A" else []
+        lines.append(
+            f"{idx}\\. *{escape_markdown(code)}* — {escape_markdown(course['course_name'])}\n"
+            f"   📁 Drive Materials: {escape_markdown(str(len(drive_matches)))}"
+            f" \\| 📺 Videos: {escape_markdown(str(video_total))}"
+        )
+
+    lines.append("\nUse `/course <course_code>` to view details\\.")
+    await update.message.reply_text(
+        "\n\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        disable_web_page_preview=True,
+    )
+
+
+@approved_only
+async def cmd_course(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show details for a specific course."""
+    if not context.args:
+        await update.message.reply_text(
+            "ℹ️ Usage: `/course <course_code>`\n\nExample: `/course EPE3090`",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+    code = context.args[0].upper().strip()
+    course = database.get_course_by_code(code)
+    if not course:
+        await update.message.reply_text(
+            f"❌ Course `{escape_markdown(code)}` not found\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+    course_id = int(course["course_id"])
+    playlists = database.get_course_playlists(course_id)
+    drive_matches = db_search_files(code, limit=10)
+
+    lines = [
+        f"📚 *{escape_markdown(course['course_name'])}* "
+        f"\\({escape_markdown(course.get('course_code') or 'N/A')}\\)\n",
+        "📺 *YouTube Content:*",
+    ]
+
+    if playlists:
+        for playlist in playlists[:8]:
+            count = playlist.get("video_count") or len(database.get_playlist_videos(playlist["playlist_id"]))
+            lines.append(
+                f"• {escape_markdown(playlist['playlist_name'])} "
+                f"\\({escape_markdown(str(count))} videos\\)"
+            )
+    else:
+        lines.append("• No playlists linked yet\\.")
+
+    lines.append("\n📁 *Drive Materials:*")
+    if drive_matches:
+        for item in drive_matches[:6]:
+            lines.append(f"• {escape_markdown(item['name'])}")
+    else:
+        lines.append("• No matching Drive materials found\\.")
+
+    keyboard_rows = []
+    if playlists and playlists[0].get("playlist_url"):
+        keyboard_rows.append([InlineKeyboardButton("▶️ Watch Playlist", url=playlists[0]["playlist_url"])])
+    if course.get("drive_folder_id"):
+        keyboard_rows.append(
+            [InlineKeyboardButton("📁 View Drive Folder", url=drive_view_link(course["drive_folder_id"]))]
+        )
+    keyboard_rows.append(
+        [InlineKeyboardButton("✅ Enroll in Course", callback_data=f"enroll:{course_id}")]
+    )
+    keyboard = InlineKeyboardMarkup(keyboard_rows)
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=keyboard,
+        disable_web_page_preview=True,
+    )
+
+
+@admin_only
+async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /broadcast <message> command."""
+    if not context.args:
+        await update.message.reply_text(
+            "ℹ️ Usage: `/broadcast <message>`\n\n"
+            "Example: `/broadcast New lecture notes available\\!`",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+    message = " ".join(context.args).strip()
+    context.user_data["broadcast_message"] = message
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 All Users", callback_data="bcast:all")],
+        [InlineKeyboardButton("📚 Select Course", callback_data="bcast:course")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="bcast:cancel")],
+    ])
+
+    await update.message.reply_text(
+        f"📢 *Broadcast Message*\n\n"
+        f"Message: `{escape_markdown(message)}`\n\n"
+        f"Send to:",
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=keyboard,
+    )
+
+
+@admin_only
+async def cmd_broadcast_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show recent broadcast delivery status."""
+    broadcasts = database.get_recent_broadcasts(limit=10)
+    if not broadcasts:
+        await update.message.reply_text("📭 No broadcasts sent yet\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        return
+
+    lines = ["📊 *Recent Broadcasts:*\n"]
+    for idx, item in enumerate(broadcasts, start=1):
+        target = "All Users"
+        if item.get("target_type") == "course":
+            target = f"{item.get('course_code') or item.get('course_name') or 'Course'} Only"
+        lines.append(
+            f"{idx}\\. \"{escape_markdown(item['message_text'][:80])}\"\n"
+            f"   Sent: {escape_markdown(str(item.get('sent_at') or 'Unknown'))}\n"
+            f"   Delivered: {escape_markdown(str(item.get('delivery_count') or 0))} users\n"
+            f"   Target: {escape_markdown(target)}"
+        )
+
+    await update.message.reply_text("\n\n".join(lines), parse_mode=ParseMode.MARKDOWN_V2)
+
+
 async def cmd_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /request <message> command for access requests."""
     user = update.effective_user
@@ -535,6 +829,124 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         action_label = "approved" if approve else "rejected"
         await query.edit_message_text(
             f"✅ Request for user `{target_user_id}` marked as *{action_label}*\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+
+    elif data.startswith("enroll:"):
+        try:
+            course_id = int(data.split(":", 1)[1])
+        except (TypeError, ValueError):
+            await query.answer("Invalid course ID.", show_alert=True)
+            return
+        inserted = database.enroll_user_in_course(user_id=user.id, course_id=course_id)
+        course = database.get_course_by_id(course_id)
+        course_name = course["course_name"] if course else "course"
+        if inserted:
+            await query.answer("Enrolled successfully.", show_alert=True)
+            await query.message.reply_text(
+                f"✅ You are now enrolled in *{escape_markdown(course_name)}*\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+        else:
+            await query.answer("Already enrolled.", show_alert=True)
+
+    elif data == "bcast:cancel":
+        context.user_data.pop("broadcast_message", None)
+        await query.edit_message_text("❌ Broadcast cancelled\\.", parse_mode=ParseMode.MARKDOWN_V2)
+
+    elif data == "bcast:all":
+        if user.id not in ADMIN_USER_IDS:
+            await query.answer("Only admins can broadcast.", show_alert=True)
+            return
+        message = context.user_data.get("broadcast_message")
+        if not message:
+            await query.answer("Broadcast message expired. Retry /broadcast.", show_alert=True)
+            return
+        recipients = sorted(set(ADMIN_USER_IDS + database.get_approved_users()))
+        sent = 0
+        for recipient in recipients:
+            try:
+                await context.bot.send_message(
+                    chat_id=recipient,
+                    text=f"📢 *Broadcast*\n\n{escape_markdown(message)}",
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                )
+                sent += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Broadcast to %s failed: %s", recipient, exc)
+        database.send_broadcast(
+            sender_id=user.id,
+            message_text=message,
+            target_type="all",
+            delivery_count=sent,
+        )
+        context.user_data.pop("broadcast_message", None)
+        await query.edit_message_text(
+            f"✅ Broadcast sent to *{sent}* users\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+
+    elif data == "bcast:course":
+        if user.id not in ADMIN_USER_IDS:
+            await query.answer("Only admins can broadcast.", show_alert=True)
+            return
+        courses = database.get_all_courses()
+        if not courses:
+            await query.answer("No courses found.", show_alert=True)
+            return
+        rows = []
+        for course in courses:
+            label = course.get("course_code") or course.get("course_name")
+            rows.append(
+                [InlineKeyboardButton(f"📚 {label}", callback_data=f"bcast_course:{course['course_id']}")]
+            )
+        rows.append([InlineKeyboardButton("❌ Cancel", callback_data="bcast:cancel")])
+        await query.edit_message_text(
+            "Select target course:",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+
+    elif data.startswith("bcast_course:"):
+        if user.id not in ADMIN_USER_IDS:
+            await query.answer("Only admins can broadcast.", show_alert=True)
+            return
+        message = context.user_data.get("broadcast_message")
+        if not message:
+            await query.answer("Broadcast message expired. Retry /broadcast.", show_alert=True)
+            return
+        try:
+            course_id = int(data.split(":", 1)[1])
+        except (TypeError, ValueError):
+            await query.answer("Invalid course.", show_alert=True)
+            return
+        recipients = sorted(set(database.get_course_enrolled_users(course_id)))
+        sent = 0
+        course = database.get_course_by_id(course_id)
+        course_label = (course.get("course_code") or course.get("course_name")) if course else "course"
+        for recipient in recipients:
+            try:
+                await context.bot.send_message(
+                    chat_id=recipient,
+                    text=(
+                        f"📢 *Course Broadcast* \\({escape_markdown(course_label)}\\)\n\n"
+                        f"{escape_markdown(message)}"
+                    ),
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                )
+                sent += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Course broadcast to %s failed: %s", recipient, exc)
+        database.send_broadcast(
+            sender_id=user.id,
+            message_text=message,
+            target_type="course",
+            target_course_id=course_id,
+            delivery_count=sent,
+        )
+        context.user_data.pop("broadcast_message", None)
+        await query.edit_message_text(
+            f"✅ Course broadcast sent to *{sent}* users "
+            f"\\({escape_markdown(course_label)}\\)\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
         )
 
@@ -1175,6 +1587,12 @@ def main() -> None:
     app.add_handler(CommandHandler("monitor", cmd_monitor))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("links", cmd_links))
+    app.add_handler(CommandHandler("setup_courses", cmd_setup_courses))
+    app.add_handler(CommandHandler("extract_youtube", cmd_extract_youtube))
+    app.add_handler(CommandHandler("courses", cmd_courses))
+    app.add_handler(CommandHandler("course", cmd_course))
+    app.add_handler(CommandHandler("broadcast", cmd_broadcast))
+    app.add_handler(CommandHandler("broadcast_status", cmd_broadcast_status))
 
     # Inline keyboard callbacks
     app.add_handler(CallbackQueryHandler(callback_query_handler))
