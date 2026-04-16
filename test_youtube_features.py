@@ -27,10 +27,12 @@ class YouTubeFeatureTests(unittest.TestCase):
 
         import config  # noqa: PLC0415
         import main  # noqa: PLC0415
+        import youtube_downloader  # noqa: PLC0415
         import youtube_service  # noqa: PLC0415
 
         importlib.reload(config)
         cls.main = importlib.reload(main)
+        cls.youtube_downloader = importlib.reload(youtube_downloader)
         cls.youtube_service = importlib.reload(youtube_service)
 
     @classmethod
@@ -89,6 +91,28 @@ class YouTubeFeatureTests(unittest.TestCase):
         self.main.asyncio.run(self.main.callback_query_handler(update, context))
 
         query.answer.assert_any_await("This download request expired. Please retry.", show_alert=True)
+
+    def test_get_formats_includes_video_only_qualities_and_audio(self) -> None:
+        downloader = self.youtube_downloader.YouTubeDownloader()
+        info = {
+            "title": "Sample",
+            "formats": [
+                {"format_id": "v1080", "vcodec": "avc1", "acodec": "none", "height": 1080, "tbr": 3000, "ext": "mp4"},
+                {"format_id": "v720", "vcodec": "avc1", "acodec": "none", "height": 720, "tbr": 2200, "ext": "mp4"},
+                {"format_id": "v480", "vcodec": "avc1", "acodec": "none", "height": 480, "tbr": 1500, "ext": "mp4"},
+                {"format_id": "v360", "vcodec": "avc1", "acodec": "none", "height": 360, "tbr": 1000, "ext": "mp4"},
+                {"format_id": "v240", "vcodec": "avc1", "acodec": "none", "height": 240, "tbr": 700, "ext": "mp4"},
+                {"format_id": "a1", "vcodec": "none", "acodec": "mp4a.40.2", "abr": 128, "ext": "m4a"},
+            ],
+        }
+
+        with patch.object(self.youtube_downloader.YouTubeDownloader, "_extract_info", return_value=info):
+            formats = self.main.asyncio.run(downloader.get_formats("https://www.youtube.com/watch?v=abc123"))
+
+        self.assertEqual(
+            [item["label"] for item in formats],
+            ["1080p", "720p", "480p", "360p", "240p", "Audio"],
+        )
 
 
 if __name__ == "__main__":

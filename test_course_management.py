@@ -144,6 +144,27 @@ class CommandMarkdownFormattingTests(unittest.TestCase):
             reply_text.await_args.kwargs["parse_mode"],
             self.main.ParseMode.MARKDOWN_V2,
         )
+        self.assertIn("Available commands:", text)
+
+    def test_cmd_start_for_unapproved_user_shows_access_request(self) -> None:
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=2, first_name="Bob"),
+            message=SimpleNamespace(reply_text=reply_text),
+        )
+        context = SimpleNamespace(args=[])
+
+        with patch.object(self.main.database, "is_user_approved", return_value=False):
+            self.main.asyncio.run(self.main.cmd_start(update, context))
+
+        reply_text.assert_awaited_once()
+        text = reply_text.await_args.args[0]
+        self.assertIn("To access this bot, please request access:", text)
+        self.assertIn("/request <message>", text)
+        self.assertEqual(
+            reply_text.await_args.kwargs["parse_mode"],
+            self.main.ParseMode.MARKDOWN_V2,
+        )
 
     def test_cmd_courses_markdown_text(self) -> None:
         reply_text = AsyncMock()
@@ -181,6 +202,35 @@ class CommandMarkdownFormattingTests(unittest.TestCase):
             reply_text.await_args.args[0],
             "Broadcast Message\n\nMessage: New lecture notes\n\nSend to:",
         )
+
+    def test_cmd_course_includes_all_playlist_links(self) -> None:
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=1, first_name="Admin"),
+            message=SimpleNamespace(reply_text=reply_text),
+        )
+        context = SimpleNamespace(args=["EPE3090"])
+        course = {
+            "course_id": 7,
+            "course_name": "Digital Control Systems",
+            "course_code": "EPE3090",
+            "drive_folder_id": "drive123",
+        }
+        playlists = [
+            {"playlist_name": "Playlist A", "playlist_url": "https://youtube.com/playlist?list=A", "video_count": 10},
+            {"playlist_name": "Playlist B", "playlist_url": "https://youtube.com/playlist?list=B", "video_count": 8},
+        ]
+
+        with patch.object(self.main.database, "get_course_by_code", return_value=course), \
+             patch.object(self.main.database, "get_course_playlists", return_value=playlists), \
+             patch.object(self.main, "db_search_files", return_value=[]):
+            self.main.asyncio.run(self.main.cmd_course(update, context))
+
+        reply_text.assert_awaited_once()
+        keyboard = reply_text.await_args.kwargs["reply_markup"]
+        self.assertEqual(len(keyboard.inline_keyboard), 4)
+        self.assertEqual(keyboard.inline_keyboard[0][0].text, "▶️ Playlist A")
+        self.assertEqual(keyboard.inline_keyboard[1][0].text, "▶️ Playlist B")
 
 
 if __name__ == "__main__":

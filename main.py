@@ -186,34 +186,50 @@ def approved_only(handler: Callable) -> Callable:
 # Command handlers
 # ---------------------------------------------------------------------------
 
-@approved_only
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /start command — send a welcome message with help text."""
+    if update.message is None:
+        return
+
     user = update.effective_user
-    name = user.first_name if user else "there"
-    text = (
-        f"Hello {name}\\! Welcome to Drive Monitor Bot\\.\n\n"
-        "I watch a Google Drive folder and notify you whenever files are added or updated\\.\n\n"
-        "Available commands:\n"
-        "/list \\- Browse files\n"
-        "/search <name> \\- Search files\n"
-        "/download <name> \\- Download file\n"
-        "/browse <id> \\- Browse folder\n"
-        "/monitor \\- Toggle monitoring\n"
-        "/status \\- Show statistics\n"
-        "/links \\- Show resources\n"
-        "/request <msg> \\- Request access\n"
-        "/requests \\- Review requests \\(admin\\)\n"
-        "/approve <id> \\- Approve user \\(admin\\)\n"
-        "/reject <id> \\- Reject user \\(admin\\)\n"
-        "/courses \\- Browse courses\n"
-        "/course <code> \\- Course details\n"
-        "/setup_courses \\- Setup courses \\(admin\\)\n"
-        "/extract_youtube \\- Extract YouTube \\(admin\\)\n"
-        "/download_youtube <url> \\- Download YouTube video\n"
-        "/broadcast <msg> \\- Broadcast \\(admin\\)\n"
-        "/broadcast_status \\- Broadcast status \\(admin\\)\n"
-    )
+    if user is None:
+        return
+
+    name = escape_markdown(user.first_name or "there")
+    is_approved = user.id in ADMIN_USER_IDS or database.is_user_approved(user.id)
+
+    if not is_approved:
+        text = (
+            f"Hello {name}\\! Welcome to Drive Monitor Bot\\.\n\n"
+            "I watch a Google Drive folder and notify you whenever files are added or updated\\.\n\n"
+            "To access this bot, please request access:\n"
+            "/request <message>\n\n"
+            "Example: /request I am a student in EPE 2026"
+        )
+    else:
+        text = (
+            f"Hello {name}\\! Welcome to Drive Monitor Bot\\.\n\n"
+            "I watch a Google Drive folder and notify you whenever files are added or updated\\.\n\n"
+            "Available commands:\n"
+            "/list \\- Browse files\n"
+            "/search <name> \\- Search files\n"
+            "/download <name> \\- Download file\n"
+            "/browse <id> \\- Browse folder\n"
+            "/monitor \\- Toggle monitoring\n"
+            "/status \\- Show statistics\n"
+            "/links \\- Show resources\n"
+            "/request <msg> \\- Request access\n"
+            "/requests \\- Review requests \\(admin\\)\n"
+            "/approve <id> \\- Approve user \\(admin\\)\n"
+            "/reject <id> \\- Reject user \\(admin\\)\n"
+            "/courses \\- Browse courses\n"
+            "/course <code> \\- Course details\n"
+            "/setup_courses \\- Setup courses \\(admin\\)\n"
+            "/extract_youtube \\- Extract YouTube \\(admin\\)\n"
+            "/download_youtube <url> \\- Download YouTube video\n"
+            "/broadcast <msg> \\- Broadcast \\(admin\\)\n"
+            "/broadcast_status \\- Broadcast status \\(admin\\)\n"
+        )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2)
 
 
@@ -656,8 +672,14 @@ async def cmd_course(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         lines.append("• No matching Drive materials found\\.")
 
     keyboard_rows = []
-    if playlists and playlists[0].get("playlist_url"):
-        keyboard_rows.append([InlineKeyboardButton("▶️ Watch Playlist", url=playlists[0]["playlist_url"])])
+    if playlists:
+        for idx, playlist in enumerate(playlists, start=1):
+            playlist_url = playlist.get("playlist_url")
+            if playlist_url:
+                playlist_name = playlist.get("playlist_name", f"Playlist {idx}")
+                keyboard_rows.append(
+                    [InlineKeyboardButton(f"▶️ {playlist_name}", url=playlist_url)]
+                )
     if course.get("drive_folder_id"):
         keyboard_rows.append(
             [InlineKeyboardButton("📁 View Drive Folder", url=drive_view_link(course["drive_folder_id"]))]
@@ -878,6 +900,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
                 url=payload["url"],
                 format_id=selected["format_id"],
                 ext_hint=selected.get("ext", ""),
+                audio_only=bool(selected.get("audio_only")),
             )
             if not result:
                 await query.edit_message_text(
