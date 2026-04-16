@@ -196,7 +196,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     name = user.first_name or "there"
-    is_approved = user.id in ADMIN_USER_IDS or database.is_user_approved(user.id)
+    is_admin = user.id in ADMIN_USER_IDS
+    is_approved = is_admin or database.is_user_approved(user.id)
 
     if not is_approved:
         text = (
@@ -205,6 +206,32 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "To access this bot, please request access:\n"
             "/request <message>\n\n"
             "Example: /request I am a student in EPE 2026"
+        )
+    elif is_admin:
+        text = (
+            f"Hello {name}! Welcome to Drive Monitor Bot.\n\n"
+            "I watch a Google Drive folder and notify you whenever files are added or updated.\n\n"
+            "Available commands:\n\n"
+            "📚 USER COMMANDS:\n"
+            "/list - Browse files\n"
+            "/search <name> - Search files\n"
+            "/download <name> - Download file\n"
+            "/browse <id> - Browse folder\n"
+            "/monitor - Toggle monitoring\n"
+            "/status - Show statistics\n"
+            "/links - Show resources\n"
+            "/request <msg> - Request access\n"
+            "/courses - Browse courses\n"
+            "/course <code> - Course details\n"
+            "/download_youtube <url> - Download YouTube video\n\n"
+            "⚙️ ADMIN COMMANDS:\n"
+            "/requests - Review pending access requests\n"
+            "/approve <id> - Approve user access\n"
+            "/reject <id> - Reject user access\n"
+            "/setup_courses - Setup courses\n"
+            "/extract_youtube - Extract YouTube playlists and videos\n"
+            "/broadcast <msg> - Broadcast message to all users\n"
+            "/broadcast_status - Show recent broadcasts\n"
         )
     else:
         text = (
@@ -219,16 +246,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "/status - Show statistics\n"
             "/links - Show resources\n"
             "/request <msg> - Request access\n"
-            "/requests - Review requests (admin)\n"
-            "/approve <id> - Approve user (admin)\n"
-            "/reject <id> - Reject user (admin)\n"
             "/courses - Browse courses\n"
             "/course <code> - Course details\n"
-            "/setup_courses - Setup courses (admin)\n"
-            "/extract_youtube - Extract YouTube (admin)\n"
             "/download_youtube <url> - Download YouTube video\n"
-            "/broadcast <msg> - Broadcast (admin)\n"
-            "/broadcast_status - Broadcast status (admin)\n"
         )
     await update.message.reply_text(text)
 
