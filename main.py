@@ -188,27 +188,26 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     name = user.first_name if user else "there"
     text = (
-        f"👋 Hello, *{escape_markdown(name)}*\\! Welcome to *Drive Monitor Bot*\\.\n\n"
+        f"Hello {name}\\! Welcome to Drive Monitor Bot\\.\n\n"
         "I watch a Google Drive folder and notify you whenever files are added or updated\\.\n\n"
-        "*Available commands:*\n"
-        "• /start — Show this help message\n"
-        "• /request `<message>` — Request access \\(for new users\\)\n"
-        "• /requests — Review pending access requests \\(admin\\)\n"
-        "• /approve `<user_id>` — Approve a request \\(admin\\)\n"
-        "• /reject `<user_id>` — Reject a request \\(admin\\)\n"
-        "• /list — Browse files in the monitored folder\n"
-        "• /browse `<folder_id>` — Browse files inside a specific folder\n"
-        "• /download `<filename>` — Download a file directly from Drive\n"
-        "• /search `<filename>` — Search for a file by name\n"
-        "• /monitor — Toggle monitoring on or off\n"
-        "• /status — Show monitoring statistics\n"
-        "• /links — Show important resource links\n"
-        "• /courses — Show available courses\n"
-        "• /course `<code>` — Show course details\n"
-        "• /setup_courses — Seed the 7 courses \\(admin\\)\n"
-        "• /extract_youtube — Extract YouTube playlists/videos \\(admin\\)\n"
-        "• /broadcast `<message>` — Broadcast to users \\(admin\\)\n"
-        "• /broadcast_status — Show recent broadcasts \\(admin\\)\n"
+        "Available commands:\n"
+        "/list \\- Browse files\n"
+        "/search <name> \\- Search files\n"
+        "/download <name> \\- Download file\n"
+        "/browse <id> \\- Browse folder\n"
+        "/monitor \\- Toggle monitoring\n"
+        "/status \\- Show statistics\n"
+        "/links \\- Show resources\n"
+        "/request <msg> \\- Request access\n"
+        "/requests \\- Review requests \\(admin\\)\n"
+        "/approve <id> \\- Approve user \\(admin\\)\n"
+        "/reject <id> \\- Reject user \\(admin\\)\n"
+        "/courses \\- Browse courses\n"
+        "/course <code> \\- Course details\n"
+        "/setup_courses \\- Setup courses \\(admin\\)\n"
+        "/extract_youtube \\- Extract YouTube \\(admin\\)\n"
+        "/broadcast <msg> \\- Broadcast \\(admin\\)\n"
+        "/broadcast_status \\- Broadcast status \\(admin\\)\n"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2)
 
@@ -503,40 +502,21 @@ async def cmd_courses(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     courses = database.get_all_courses()
     if not courses:
         await update.message.reply_text(
-            "📭 No courses available yet\\. Ask admin to run /setup_courses\\.",
+            "No courses available yet\\. Ask admin to run /setup_courses\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
         )
         return
 
-    lines = ["📚 *Available Courses:*\n"]
-    all_files = get_all_files(limit=5000)
-    drive_counts: Dict[str, int] = {}
-    course_codes = [
-        (course.get("course_code") or "").upper()
-        for course in courses
-        if course.get("course_code")
-    ]
-    for item in all_files:
-        file_name_upper = (item.get("name") or "").upper()
-        for code in course_codes:
-            if code in file_name_upper:
-                drive_counts[code] = drive_counts.get(code, 0) + 1
+    lines = ["*Available Courses:*\n"]
     for idx, course in enumerate(courses, start=1):
         code = course.get("course_code") or "N/A"
-        course_id = int(course["course_id"])
-        video_total = database.get_course_video_count(course_id)
-        drive_count = drive_counts.get(code.upper(), 0) if code != "N/A" else 0
-        lines.append(
-            f"{idx}\\. *{escape_markdown(code)}* — {escape_markdown(course['course_name'])}\n"
-            f"   📁 Drive Materials: {escape_markdown(str(drive_count))}"
-            f" \\| 📺 Videos: {escape_markdown(str(video_total))}"
-        )
+        name = course.get("course_name") or "Unknown"
+        lines.append(f"{idx}\\. {code} \\- {name}")
 
-    lines.append("\nUse `/course <course_code>` to view details\\.")
+    lines.append("\nUse /course CODE to view details\\.")
     await update.message.reply_text(
-        "\n\n".join(lines),
+        "\n".join(lines),
         parse_mode=ParseMode.MARKDOWN_V2,
-        disable_web_page_preview=True,
     )
 
 
@@ -613,8 +593,7 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """Handle /broadcast <message> command."""
     if not context.args:
         await update.message.reply_text(
-            "ℹ️ Usage: `/broadcast <message>`\n\n"
-            "Example: `/broadcast New lecture notes available\\!`",
+            "Usage: /broadcast <message>\n\nExample: /broadcast New lecture notes\\!",
             parse_mode=ParseMode.MARKDOWN_V2,
         )
         return
@@ -622,16 +601,14 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     message = " ".join(context.args).strip()
     context.user_data["broadcast_message"] = message
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📢 All Users", callback_data="bcast:all")],
-        [InlineKeyboardButton("📚 Select Course", callback_data="bcast:course")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="bcast:cancel")],
+        [InlineKeyboardButton("All Users", callback_data="bcast:all")],
+        [InlineKeyboardButton("Select Course", callback_data="bcast:course")],
+        [InlineKeyboardButton("Cancel", callback_data="bcast:cancel")],
     ])
 
     await update.message.reply_text(
-        f"📢 *Broadcast Message*\n\n"
-        f"Message: `{escape_markdown(message)}`\n\n"
-        f"Send to:",
-        parse_mode=ParseMode.MARKDOWN_V2,
+        f"Broadcast Message\n\nMessage: {message}\n\nSend to:",
+        parse_mode=None,
         reply_markup=keyboard,
     )
 
