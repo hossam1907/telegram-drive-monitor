@@ -106,7 +106,7 @@ class CommandMarkdownFormattingTests(unittest.TestCase):
         os.environ["DRIVE_FOLDER_ID"] = "folder"
         os.environ["GOOGLE_CREDENTIALS_FILE"] = cls.creds_path
         os.environ["ADMIN_USER_IDS"] = "1"
-        os.environ["DATABASE_PATH"] = "/tmp/telegram_drive_monitor_handlers_test.db"
+        os.environ["DATABASE_PATH"] = os.path.join(cls.temp_dir.name, "test_handlers.db")
 
         import config  # noqa: PLC0415
         import main  # noqa: PLC0415

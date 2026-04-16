@@ -608,6 +608,7 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     await update.message.reply_text(
         f"Broadcast Message\n\nMessage: {message}\n\nSend to:",
+        parse_mode=None,
         reply_markup=keyboard,
     )
 
